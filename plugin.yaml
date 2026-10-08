@@ -1,0 +1,8 @@
+name: thymos
+version: 0.1.0
+description: "Personality and emotions for Hermes Agent. After each reply the agent privately notes, in its own words, how the exchange left it."
+author: Kayla Roylance
+license: MIT
+homepage: https://github.com/Kaylachuuu/hermes-thymos
+provides_hooks:
+  - post_llm_call
