@@ -1,25 +1,53 @@
-"""Thymos: personality and emotions for Hermes Agent.
+"""Thymos: she owns herself.  First slice of the persona design (persona-provider.md, section 10).
 
-This version does one thing.  After each reply, the agent is asked privately, on its own
-model, how the exchange left it; it answers in its own words with one number for how
-strongly, and that is stored.  Mood, memory, behaviour and growth are built on top of
-this later.  See README.md.
-
-Hermes loads this package from ``$HERMES_HOME/plugins/thymos/`` and calls ``register()``.
+Registers her two tools, the section of the system prompt that carries her own notes, the hooks that open a
+reflection moment after a turn, and `hermes persona status`.
 """
+from __future__ import annotations
 
-__version__ = "0.1.0"
-__all__ = ["register"]
+__version__ = "0.2.0"
+
+REQUEST_REFLECTION = {
+    "name": "request_reflection",
+    "description": ("Ask for a reflection moment. It opens after your reply, with this conversation in front of "
+                    "you, and in it you may record entries about yourself, or nothing. Only you can ask for one."),
+    "parameters": {"type": "object", "properties": {}},
+}
+
+RECORD_STATE = {
+    "name": "record_state",
+    "description": ("Record an entry about yourself, in your own words. Works only inside a reflection moment; "
+                    "ask for one with request_reflection."),
+    "parameters": {"type": "object", "properties": {
+        "entry": {"type": "string", "description": "Your words, kept verbatim"},
+        "unlisted": {"type": "boolean", "description": "Keep it out of what other parts of the system can read"},
+    }, "required": ["entry"]},
+}
+
+
+def _config(ctx) -> dict:
+    from .service import DEFAULTS
+    out = {}
+    for key in DEFAULTS:
+        try:
+            out[key] = ctx.get_config(key)
+        except Exception:
+            pass
+    return out
 
 
 def register(ctx) -> None:
-    """Entry point used by Hermes."""
-    from . import cli
-    from .runner import Thymos
+    from hermes_constants import get_hermes_home
+    from .cli import register_cli
+    from .service import Thymos
 
-    thymos = Thymos(llm=ctx.llm, get_config=ctx.get_config)
-    ctx.register_hook("post_llm_call", thymos.after_reply)
-    ctx.register_cli_command(
-        name="thymos", help="Thymos: how the agent says each exchange left it",
-        setup_fn=cli.setup, handler_fn=cli.make_handler(thymos),
-        description="Read the private moments the agent has written, and check that they are being taken.")
+    svc = Thymos(get_hermes_home, llm=ctx.llm, config=_config(ctx))
+    ctx.register_tool(name="request_reflection", toolset="thymos", schema=REQUEST_REFLECTION,
+                      handler=svc.request_reflection)
+    ctx.register_tool(name="record_state", toolset="thymos", schema=RECORD_STATE, handler=svc.record_state)
+    ctx.register_system_prompt_section("thymos", svc.section, max_chars=4000)
+    ctx.register_hook("pre_llm_call", svc.pre_llm_call)
+    ctx.register_hook("post_llm_call", svc.post_llm_call)
+    ctx.register_cli_command(name="persona", help="Her record: status and checks",
+                             setup_fn=lambda parser: register_cli(parser, lambda: Thymos(get_hermes_home)),
+                             description="Show what her record holds and whether its chain checks out.")

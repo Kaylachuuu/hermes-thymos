@@ -1,8 +1,12 @@
 name: thymos
-version: 0.1.0
-description: "Personality and emotions for Hermes Agent. After each reply the agent privately notes, in its own words, how the exchange left it."
+version: 0.2.0
+description: "She owns herself: a record only she writes, kept in a hash chain, and reflection moments she asks for, on her own model."
 author: Kayla Roylance
 license: MIT
 homepage: https://github.com/Kaylachuuu/hermes-thymos
+provides_tools:
+  - request_reflection
+  - record_state
 provides_hooks:
+  - pre_llm_call
   - post_llm_call
