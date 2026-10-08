@@ -64,7 +64,34 @@ def status(svc: Thymos) -> str:
         if lr.get("problem"):
             line += f"; {lr['problem']}"
         out.append(line)
+    out += _idle_lines(svc, state)
     return "\n".join(out)
+
+
+def _idle_lines(svc: Thymos, state: dict) -> list:
+    """Idle time: conversations waiting to be offered to her, and what became of her accounts."""
+    out = []
+    convs = svc.conversations()
+    due = svc.due_conversations()
+    out.append(f"conversations kept for idle time: {len(convs)}, {len(due)} waiting to be offered to her")
+    la = state.get("last_account")
+    if la:
+        line = f"last account moment: {_when(la['at'])}, conversation {la.get('session_id')}"
+        if "account" in la:
+            line += (", she stored an account" if la["account"] else ", she stored no account")
+            if la.get("wrote"):
+                line += f" and {la['wrote']} entr{'y' if la['wrote'] == 1 else 'ies'}"
+            line += f" on {la.get('model')}"
+        if la.get("problem"):
+            line += f"; {la['problem']}"
+        out.append(line)
+    folder = svc.data / "accounts"
+    waiting = len(list(folder.glob("*.json"))) if folder.exists() else 0
+    stored = len(list((folder / "stored").glob("*.json"))) if (folder / "stored").exists() else 0
+    accounts = sum(1 for e in svc.chain.entries() if e.get("kind") == "account")
+    out.append(f"her accounts: {accounts} in her record; {stored} stored by the memory provider, {waiting} waiting for it"
+               + (" (it stores them while Hermes is open, if it reads them: holonomic 0.25 or later)" if waiting else ""))
+    return out
 
 
 def register_cli(parser: Any, svc_factory) -> None:

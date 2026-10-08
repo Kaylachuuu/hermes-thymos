@@ -1,5 +1,5 @@
 name: thymos
-version: 0.2.0
+version: 0.3.0
 description: "She owns herself: a record only she writes, kept in a hash chain, and reflection moments she asks for, on her own model."
 author: Kayla Roylance
 license: MIT
@@ -10,3 +10,4 @@ provides_tools:
 provides_hooks:
   - pre_llm_call
   - post_llm_call
+  - on_session_finalize
