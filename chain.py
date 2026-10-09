@@ -97,20 +97,31 @@ class Chain:
         if kind not in KINDS:
             raise ValueError(f"unknown kind {kind!r}")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with _Lock(self.path.with_suffix(".lock")):
-            existing = self.entries()
-            entry = dict(DEFAULTS)
-            entry.update(fields)
-            entry.update(id=fields.get("id") or uuid.uuid4().hex[:12], kind=kind,
-                         at=float(fields.get("at") or time.time()),
-                         prev_hash=existing[-1].get("hash", "") if existing else "")
-            entry["shown_with"] = list(entry.get("shown_with") or [])
-            entry["hash"] = entry_hash(entry)
-            with open(self.path, "a", encoding="utf-8", newline="\n") as f:
-                f.write(json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            self._write_anchor(entry["hash"], len(existing) + 1)
+        with self.lock():
+            return self.append_locked(kind, **fields)
+
+    def lock(self) -> _Lock:
+        """Held while anything writes the record.  Backup holds it too, so its copy is never half an append."""
+        return _Lock(self.path.with_suffix(".lock"))
+
+    def append_locked(self, kind: str, **fields: Any) -> Dict[str, Any]:
+        """append(), for a caller already holding lock() (restore)."""
+        if kind not in KINDS:
+            raise ValueError(f"unknown kind {kind!r}")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        existing = self.entries()
+        entry = dict(DEFAULTS)
+        entry.update(fields)
+        entry.update(id=fields.get("id") or uuid.uuid4().hex[:12], kind=kind,
+                     at=float(fields.get("at") or time.time()),
+                     prev_hash=existing[-1].get("hash", "") if existing else "")
+        entry["shown_with"] = list(entry.get("shown_with") or [])
+        entry["hash"] = entry_hash(entry)
+        with open(self.path, "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        self._write_anchor(entry["hash"], len(existing) + 1)
         return entry
 
     def _write_anchor(self, head: str, count: int) -> None:

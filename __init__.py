@@ -1,13 +1,13 @@
 """Thymos: she owns herself.  The persona design (persona-provider.md), built a slice at a time.
 
 Registers her two tools, the section of the system prompt that carries her own notes, the hooks that open a
-reflection moment after a turn and offer her ended conversations at idle, and `hermes persona status`.  It also
-tells the memory provider, through an environment variable in Hermes' process, that a persona service is running,
-so that holonomic stops writing in her voice (holonomic's persona.py).
+reflection moment after a turn and offer her ended conversations at idle, and `hermes persona` (status, backup,
+restore).  It also tells the memory provider, through an environment variable in Hermes' process, that a persona
+service is running, so that holonomic stops writing in her voice (holonomic's persona.py).
 """
 from __future__ import annotations
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 REQUEST_REFLECTION = {
     "name": "request_reflection",
@@ -58,6 +58,6 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", svc.pre_llm_call)
     ctx.register_hook("post_llm_call", svc.post_llm_call)
     ctx.register_hook("on_session_finalize", svc.on_session_finalize)
-    ctx.register_cli_command(name="persona", help="Her record: status and checks",
+    ctx.register_cli_command(name="persona", help="Her record: status, backup and restore",
                              setup_fn=lambda parser: register_cli(parser, lambda: Thymos(get_hermes_home)),
-                             description="Show what her record holds and whether its chain checks out.")
+                             description="Show what her record holds and whether its chain checks out; back it up; restore it if it is lost or damaged.")

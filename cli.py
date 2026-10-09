@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, Tuple
+from pathlib import Path
+from typing import Any, Callable, Optional, Tuple
 
+from . import backup
 from .chain import same_model, sha256
 from .service import Thymos, _when
 
@@ -21,6 +23,10 @@ def configured_model() -> Tuple[str, str]:
 
 def status(svc: Thymos) -> str:
     entries = svc.chain.entries()
+    if not entries and svc.chain.read_anchor():
+        return (f"thymos: her record is missing. The anchor says it held {svc.chain.read_anchor().get('count')} "
+                f"entries, ending at {str(svc.chain.read_anchor().get('head'))[:12]}.\nrecord: {svc.chain.path}\n"
+                "Put it back from a backup with: hermes persona restore [BACKUP]")
     if not entries:
         return ("thymos: no record yet. It starts with her seed the first time a session opens with the plugin "
                 f"enabled.\nrecord: {svc.chain.path}")
@@ -105,6 +111,18 @@ def _idle_lines(svc: Thymos, state: dict) -> list:
         if ls.get("problem"):
             line += f"; {ls['problem']}"
     out.append(line)
+    restored = len(list((svc.data / "restored").glob("*.json"))) if (svc.data / "restored").exists() else 0
+    lr = state.get("last_restored")
+    if restored or lr:
+        line = "after a restore: " + ("waiting to be told" if restored else "she was told")
+        if lr:
+            line += f"; last moment {_when(lr['at'])}"
+            if "wrote" in lr:
+                line += (f", shown {lr['shown']} entr{'y' if lr['shown'] == 1 else 'ies'} from after the backup, she wrote "
+                         f"{lr['wrote']} on {lr.get('model')}")
+            if lr.get("problem"):
+                line += f"; {lr['problem']}"
+        out.append(line)
     old = svc.data / "old-notes.json"
     lo = state.get("last_old_notes")
     if old.exists() or lo:
@@ -119,10 +137,78 @@ def _idle_lines(svc: Thymos, state: dict) -> list:
     return out
 
 
+def _n(count: int, one: str, many: str) -> str:
+    return f"{count} {one if count == 1 else many}"
+
+
+def do_backup(svc: Thymos, dest: Optional[str] = None) -> str:
+    from . import __version__
+    try:
+        m = backup.backup(svc.chain, Path(dest).expanduser() if dest else None, version=__version__)
+    except backup.RefusedError as e:
+        return f"not backed up: {e}"
+    out = [f"backed up her record to {m['folder']}",
+           f"  {_n(m['count'], 'entry', 'entries')}, head {m['head'][:12]}, taken {m['made']}"]
+    if m["problems_when_taken"]:
+        out.append("  her record did not check out when this was taken; the backup is a copy of it as it was, and "
+                   "cannot be restored from:")
+        out += [f"    - {p}" for p in m["problems_when_taken"]]
+    out.append("  her memory is not in it; back that up with: hermes holonomic backup")
+    return "\n".join(out)
+
+
+def do_restore(svc: Thymos, src: Optional[str] = None, yes: bool = False, ask: Callable[[str], str] = input) -> str:
+    try:
+        folder = backup.find(Path(src).expanduser() if src else None)
+        m = backup.check_backup(folder)
+    except backup.RefusedError as e:
+        return f"not restored: {e}"
+    why = backup.refusal(svc.chain)
+    if why:
+        return f"not restored: {why}"
+    found = backup.problems(svc.chain)
+    print(f"backup: {folder}\n  {_n(m['count'], 'entry', 'entries')}, head {str(m['head'])[:12]}, taken {m.get('made')}")
+    if not svc.chain.entries():
+        now = "missing"
+    elif found:
+        now = f"{len(found)} problem(s)\n" + "\n".join(f"  - {n['detail']}" for n in found)
+    else:
+        now = "nothing in it but a seed (a fresh start)"
+    print("her record now: " + now)
+    print(f"what is there now is copied aside to {svc.chain.path.parent}.replaced-<time>, not deleted, and she is "
+          "told at the next quiet moment.")
+    if not yes and ask("Restore her record from this backup? [y/N] ").strip().lower() not in ("y", "yes"):
+        return "not restored."
+    try:
+        r = backup.restore(svc.chain, folder, svc.data)
+    except backup.RefusedError as e:
+        return f"not restored: {e}"
+    gone = r["entries_no_longer_present"]
+    return "\n".join([
+        f"restored her record from {r['folder']}",
+        f"  set aside: {r['set_aside'] or '(nothing was there)'}",
+        f"  entries written after the backup that are no longer in it: {gone}"
+        + (f", {r['hers_to_show']} of them hers, to be shown to her" if r["hers_to_show"] else ""),
+        "  a restore record was appended, and she is told at the next quiet moment while Hermes is running.",
+        "  if her memory was restored too or needs to be: hermes holonomic restore"])
+
+
 def register_cli(parser: Any, svc_factory) -> None:
     sub = parser.add_subparsers(dest="persona_command")
     sub.add_parser("status", help="What her record holds and whether its chain checks out")
+    b = sub.add_parser("backup", help="Copy her record, its anchor and a manifest to a folder (reads and changes nothing)")
+    b.add_argument("dest", nargs="?", help=f"Folder to write; default a new dated folder in {backup.default_folder()}")
+    r = sub.add_parser("restore", help="Put her record back from a backup, only if it is missing or damaged")
+    r.add_argument("src", nargs="?", help="A backup folder, or a folder of them (the newest); default the newest "
+                                          f"in {backup.default_folder()}")
+    r.add_argument("--yes", action="store_true", help="Do not ask before restoring")
 
     def run(args: Any) -> None:
-        print(status(svc_factory()))
+        command = getattr(args, "persona_command", None)
+        if command == "backup":
+            print(do_backup(svc_factory(), args.dest))
+        elif command == "restore":
+            print(do_restore(svc_factory(), args.src, args.yes))
+        else:
+            print(status(svc_factory()))
     parser.set_defaults(func=run)
