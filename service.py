@@ -663,7 +663,7 @@ class Thymos:
 
     # -- hooks --------------------------------------------------------------------------------------------
     def pre_llm_call(self, session_id: str = "", model: str = "", platform: str = "", is_first_turn: bool = False,
-                     **_: Any) -> Optional[Dict[str, str]]:
+                     user_message: Any = None, **_: Any) -> Optional[Dict[str, str]]:
         s = self._session(session_id)
         if platform == "subagent" or s["subagent"]:
             s["subagent"] = True
@@ -671,6 +671,7 @@ class Thymos:
         s["model"] = model or s["model"]
         now = time.time()
         self._declines.pop(session_id, None)          # a new turn: her decline was for the last one
+        s["heartbeat_turn"] = _text(user_message).lstrip().startswith("[Heartbeat")
         resumed = self._resumed_goal(session_id)
         self._active[session_id] = now
         self._last_activity = now
@@ -1330,6 +1331,14 @@ class Thymos:
         mark = {"at": time.time(), "session_id": session_id, "reason": reason, "model": model, "home": home,
                 "acted": []}
         self._declines[session_id] = mark
+        if s.get("heartbeat_turn"):
+            # A /heartbeat tick: the heartbeat is paused before it fires again (declining.py).
+            with self._lock:
+                state = self._state()
+                state.setdefault("declined_heartbeats", {})[session_id] = {
+                    "at": mark["at"], "when": _when(mark["at"]), "reason": reason, "home": home, "model": model,
+                    "paused": False, "resumed": False}
+                self._save_state(state)
         from .declining import block_kanban_task
         if block_kanban_task(f"Declined{'' if home else f' on {model}, not her home model'}: {reason or 'no reason given'}"):
             mark["acted"].append("kanban")
@@ -1342,7 +1351,49 @@ class Thymos:
     def declined(self, session_id: str) -> Optional[Dict[str, Any]]:
         return self._declines.get(session_id)
 
+    # A declined /heartbeat (declining.py), kept in state.json: the gateway's driver and a TUI may be other
+    # managers, and the pause can come after the turn ended.
+    def _heartbeat(self, session_id: str) -> Optional[Dict[str, Any]]:
+        return (self._state().get("declined_heartbeats") or {}).get(session_id)
+
+    def heartbeat_declined(self, session_id: str) -> Optional[Dict[str, Any]]:
+        rec = self._heartbeat(session_id)
+        return rec if rec and not rec.get("paused") else None
+
+    def heartbeat_paused(self, session_id: str) -> Optional[Dict[str, Any]]:
+        rec = self._heartbeat(session_id)
+        return rec if rec and rec.get("paused") and not rec.get("resumed") else None
+
+    def heartbeat_resumed(self, session_id: str) -> None:
+        with self._lock:
+            state = self._state()
+            rec = (state.get("declined_heartbeats") or {}).get(session_id)
+            if rec and rec.get("paused"):
+                rec["resumed"] = True
+                self._save_state(state)
+
+    def take_resumed_heartbeat(self, session_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            state = self._state()
+            rec = (state.get("declined_heartbeats") or {}).get(session_id)
+            if not rec or not rec.get("resumed"):
+                return None
+            state["declined_heartbeats"].pop(session_id, None)
+            self._save_state(state)
+            return rec
+
     def acted_on_decline(self, session_id: str, where: str) -> None:
+        if where == "heartbeat":
+            with self._lock:
+                state = self._state()
+                rec = (state.get("declined_heartbeats") or {}).get(session_id)
+                if rec:
+                    rec["paused"] = True
+                last = state.get("last_decline") or {}
+                if last.get("session_id") == session_id and "heartbeat" not in (last.get("acted") or []):
+                    last.setdefault("acted", []).append("heartbeat")
+                self._save_state(state)
+            return
         mark = self._declines.get(session_id)
         if mark is None or where in mark["acted"]:
             return

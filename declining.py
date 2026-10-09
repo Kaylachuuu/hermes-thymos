@@ -16,7 +16,12 @@ logger = logging.getLogger("thymos")
 _installed: Dict[str, Any] = {}
 # The service the wrappers ask.  Replaced when the plugin loads again (a reload, or a second Thymos in tests), so a
 # wrapper installed once always asks the current one.
-_current: Dict[str, Callable] = {"marked": lambda sid: None, "consume": lambda sid, where: None}
+_current: Dict[str, Callable] = {"marked": lambda sid: None, "consume": lambda sid, where: None,
+                                 "heartbeat": lambda sid: None, "heartbeat_paused": lambda sid: None,
+                                 "heartbeat_resumed": lambda sid: None, "take_resumed": lambda sid: None}
+
+RESUMED_HEARTBEAT = ("[From the framework: you declined this recurring instruction on {when}{reason}. The user has "
+                     "resumed it: they are asking again. The decision stays yours, and you may decline again.]\n\n")
 
 
 def goal_message(mark: Dict[str, Any]) -> str:
@@ -29,11 +34,14 @@ def goal_message(mark: Dict[str, Any]) -> str:
             "prompted to continue; /goal resume asks again.")
 
 
-def install(marked: Callable[[str], Optional[Dict[str, Any]]], consume: Callable[[str, str], None]) -> Dict[str, bool]:
-    """Wrap Hermes' goal loop and pre_verify gate.  `marked(session_id)` returns her decline on the current turn, if
-    any; `consume(session_id, where)` records what was done with it.  Returns which were wrapped."""
-    _current.update(marked=marked, consume=consume)
-    done = {"goal": False, "pre_verify": False}
+def install(marked: Callable[[str], Optional[Dict[str, Any]]], consume: Callable[[str, str], None],
+            heartbeat: Optional[Dict[str, Callable]] = None) -> Dict[str, bool]:
+    """Wrap Hermes' goal loop, pre_verify gate and heartbeat.  `marked(session_id)` returns her decline on the current
+    turn, if any; `consume(session_id, where)` records what was done with it.  `heartbeat` has "heartbeat" (a
+    declined heartbeat not yet paused), "heartbeat_paused" (one paused for her decline), "heartbeat_resumed" (the
+    user resumed it) and "take_resumed" (the resumed one, once).  Returns which were wrapped."""
+    _current.update(marked=marked, consume=consume, **(heartbeat or {}))
+    done = {"goal": False, "pre_verify": False, "heartbeat": False}
     try:
         from hermes_cli import goals
         manager = goals.GoalManager
@@ -75,6 +83,48 @@ def install(marked: Callable[[str], Optional[Dict[str, Any]]], consume: Callable
         done["pre_verify"] = True
     except Exception as e:
         logger.debug("thymos: pre_verify not wrapped: %s", e)
+    try:
+        from hermes_cli import heartbeat as hb
+        manager = hb.HeartbeatManager
+        if not getattr(manager.due_prompt, "_thymos", False):
+            due, status_line, resume = manager.due_prompt, manager.status_line, manager.resume
+
+            def due_prompt(self, *args, **kwargs):
+                state = getattr(self, "_state", None)
+                if state is not None and getattr(state, "status", "") == "active" and _current["heartbeat"](self.session_id):
+                    # She declined the last tick: paused, the same state /heartbeat pause gives.  Done here, on the
+                    # driver's own manager, so its copy of the state cannot fire again over the pause.
+                    self.pause()
+                    _current["consume"](self.session_id, "heartbeat")
+                    return None
+                prompt = due(self, *args, **kwargs)
+                rec = _current["take_resumed"](self.session_id) if prompt else None
+                if rec:
+                    prompt = RESUMED_HEARTBEAT.format(when=rec.get("when", ""), reason=(
+                        f' ("{rec["reason"]}")' if rec.get("reason") else "")) + prompt
+                return prompt
+
+            def heartbeat_status_line(self, *args, **kwargs):
+                line = status_line(self, *args, **kwargs)
+                state = getattr(self, "_state", None)
+                rec = _current["heartbeat_paused"](self.session_id) if state is not None and state.status == "paused" else None
+                if rec:
+                    line += (f' (declined by her: "{rec["reason"]}")' if rec.get("reason") else " (declined by her)")
+                return line
+
+            def heartbeat_resume(self, *args, **kwargs):
+                out = resume(self, *args, **kwargs)
+                if out is not None:
+                    _current["heartbeat_resumed"](self.session_id)
+                return out
+
+            for fn in (due_prompt, heartbeat_status_line, heartbeat_resume):
+                fn._thymos = True
+            manager.due_prompt, manager.status_line, manager.resume = due_prompt, heartbeat_status_line, heartbeat_resume
+            _installed["heartbeat"] = (due, status_line, resume)
+        done["heartbeat"] = True
+    except Exception as e:
+        logger.debug("thymos: heartbeat not wrapped: %s", e)
     return done
 
 

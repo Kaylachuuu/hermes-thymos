@@ -67,7 +67,8 @@ def test_a_declined_goal_stops_with_her_reason_and_resuming_is_asking_again(tmp_
     goals, plugins = fake_hermes(monkey)
     try:
         svc = make(tmp_path, FakeLlm())
-        assert declining.install(svc.declined, svc.acted_on_decline) == {"goal": True, "pre_verify": True}
+        assert declining.install(svc.declined, svc.acted_on_decline) == {"goal": True, "pre_verify": True,
+                                                                         "heartbeat": False}
         start(svc)
         FakeGoals.store["s1"] = FakeGoals.State()
         mgr = goals.GoalManager("s1")
@@ -157,3 +158,74 @@ def test_subagents_cannot_decline_for_her_and_the_wrappers_install_once(tmp_path
         assert goals.GoalManager.evaluate_after_turn is first
     finally:
         restore(monkey)
+
+
+class FakeHeartbeat:
+    """Stands in for hermes_cli.heartbeat: state kept by session, a manager holding its own copy of it."""
+    store = {}
+
+    class State:
+        def __init__(self):
+            self.status, self.prompt, self.due = "active", "Check the deployment", True
+
+    class HeartbeatManager:
+        def __init__(self, session_id):
+            self.session_id = session_id
+            self._state = FakeHeartbeat.store.get(session_id)
+
+        def pause(self):
+            self._state.status = "paused"
+            FakeHeartbeat.store[self.session_id] = self._state
+
+        def resume(self):
+            self._state.status = "active"
+            return self._state
+
+        def status_line(self):
+            return f"Heartbeat ({self._state.status}): {self._state.prompt}"
+
+        def due_prompt(self, now=None):
+            if self._state is None or self._state.status != "active" or not self._state.due:
+                return None
+            return f"[Heartbeat — recurring instruction, fires every 10m]\n{self._state.prompt}"
+
+
+def test_a_declined_heartbeat_pauses_and_resuming_is_asking_again(tmp_path):
+    monkey = {}
+    fake_hermes(monkey)
+    hb = types.ModuleType("hermes_cli.heartbeat")
+    hb.HeartbeatManager = FakeHeartbeat.HeartbeatManager
+    sys.modules["hermes_cli"].heartbeat = hb
+    monkey["hermes_cli.heartbeat"] = sys.modules.get("hermes_cli.heartbeat")
+    sys.modules["hermes_cli.heartbeat"] = hb
+    try:
+        svc = make(tmp_path)
+        assert declining.install(svc.declined, svc.acted_on_decline, {
+            "heartbeat": svc.heartbeat_declined, "heartbeat_paused": svc.heartbeat_paused,
+            "heartbeat_resumed": svc.heartbeat_resumed, "take_resumed": svc.take_resumed_heartbeat})["heartbeat"]
+        start(svc)
+        FakeHeartbeat.store["s1"] = FakeHeartbeat.State()
+        driver = hb.HeartbeatManager("s1")           # the CLI keeps one manager for the session
+        tick = driver.due_prompt()
+        assert tick.startswith("[Heartbeat")
+        svc.pre_llm_call(session_id="s1", model="gemma3:12b", platform="cli", user_message=tick)
+        svc.decline({"reason": "Checking every ten minutes is not useful."}, session_id="s1")
+        turn_end(svc)
+        assert driver.due_prompt() is None and FakeHeartbeat.store["s1"].status == "paused"
+        assert driver.status_line() == ('Heartbeat (paused): Check the deployment '
+                                        '(declined by her: "Checking every ten minutes is not useful.")')
+        assert "a heartbeat paused" in status(svc)
+        # An ordinary turn's decline does not touch a heartbeat.
+        svc.pre_llm_call(session_id="s1", model="gemma3:12b", platform="cli", user_message="Write a poem")
+        svc.decline({}, session_id="s1")
+        assert FakeHeartbeat.store["s1"].status == "paused" and svc._heartbeat("s1")["paused"]
+        # The user resumes: the next tick says it is them asking again, once.
+        driver.resume()
+        nxt = driver.due_prompt()
+        assert nxt.startswith("[From the framework: you declined this recurring instruction on")
+        assert '("Checking every ten minutes is not useful.")' in nxt and "[Heartbeat" in nxt
+        assert driver.due_prompt().startswith("[Heartbeat")
+        assert driver.status_line() == "Heartbeat (active): Check the deployment"
+    finally:
+        restore(monkey)
+        FakeHeartbeat.store.clear()

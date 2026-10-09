@@ -132,7 +132,9 @@ Not related to the OpenClaw skill of the same name.
   - a `/goal` is paused with her reason, its judge is not run on that turn, and Hermes shows
     "⏸ Goal declined. Her reason: ...". `/goal resume` is the user asking again, and her next turn is told so;
   - in a kanban worker, the task is blocked with her reason;
-  - no `pre_verify` nudge is sent on that turn.
+  - no `pre_verify` nudge is sent on that turn;
+  - on a `/heartbeat` tick, the heartbeat is paused (as `/heartbeat pause` would) and `/heartbeat status` shows
+    her reason. `/heartbeat resume` is the user asking again, and the next tick tells her so.
   It works on any model, since stopping is the safe direction, but a decline on another model is shown as that
   model's. Subagents don't have it. Her standing text says she may decline anyone, that declining is a complete
   answer, and that being asked to reconsider is a request.
@@ -211,10 +213,11 @@ The design puts this in Hermes core. As a plugin it has these limits:
   Hermes update changes that layout, it leaves the prompt alone and status says slot one was not placed.
   Requests that do not go through Hermes' main loop (another plugin's own model calls) are not changed.
 - **Declining wraps Hermes' own functions.** Core has no place for a decline yet, so the plugin wraps
-  `GoalManager.evaluate_after_turn` and `get_pre_verify_continue_message` when it loads. A Hermes update that
+  `GoalManager.evaluate_after_turn`, `get_pre_verify_continue_message` and three `HeartbeatManager` methods
+  (`due_prompt`, `status_line`, `resume`) when it loads. A Hermes update that
   renames them leaves her decline working in conversation but not stopping those loops; status still records
-  it. A declined goal shows as paused, with her reason, because Hermes has no "declined" state. Scheduled runs
-  and `/heartbeat` (where a build has it) are not handled yet.
+  it. A declined goal shows as paused, with her reason, because Hermes has no "declined" state. A heartbeat turn
+  is recognised by Hermes' "[Heartbeat" prefix on the message. Scheduled runs are not handled yet.
 - **A session start is the plugin's guess.** It is the first prompt built, or the first call, for a session
   id it has not seen. A run Hermes starts on its own also counts, so a revision can take effect, and stop
   being withdrawable, sooner than the next conversation.

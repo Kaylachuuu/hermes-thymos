@@ -63,7 +63,8 @@ def status(svc: Thymos) -> str:
     state = svc._state()
     ld = state.get("last_decline")
     if ld:
-        acted = {"goal": "a goal paused", "kanban": "a kanban task blocked", "pre_verify": "a verify nudge not sent"}
+        acted = {"goal": "a goal paused", "kanban": "a kanban task blocked", "pre_verify": "a verify nudge not sent",
+                 "heartbeat": "a heartbeat paused"}
         out.append(f"declines: {state.get('declines', 1)}; last {_when(ld['at'])}"
                    + ("" if ld.get("home", True) else f" on {ld.get('model')}, not her home model")
                    + (f', her reason: "{ld["reason"]}"' if ld.get("reason") else ", no reason given")

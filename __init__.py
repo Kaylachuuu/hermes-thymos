@@ -69,9 +69,11 @@ def register(ctx) -> None:
                       handler=svc.request_reflection)
     ctx.register_tool(name="record_state", toolset="thymos", schema=RECORD_STATE, handler=svc.record_state)
     ctx.register_tool(name="decline", toolset="thymos", schema=DECLINE, handler=svc.decline)
-    # A goal, a kanban task's verify nudge: Hermes' loops that would otherwise read her no as unfinished work.
+    # A goal, a heartbeat, a verify nudge: Hermes' loops that would otherwise read her no as unfinished work.
     from .declining import install
-    install(svc.declined, svc.acted_on_decline)
+    install(svc.declined, svc.acted_on_decline, {
+        "heartbeat": svc.heartbeat_declined, "heartbeat_paused": svc.heartbeat_paused,
+        "heartbeat_resumed": svc.heartbeat_resumed, "take_resumed": svc.take_resumed_heartbeat})
     ctx.register_system_prompt_section("thymos", svc.section, max_chars=4000)
     ctx.register_hook("pre_llm_call", svc.pre_llm_call)
     ctx.register_hook("post_llm_call", svc.post_llm_call)
