@@ -3,7 +3,7 @@
 Personality for [Hermes Agent](https://hermes-agent.nousresearch.com): a record of herself that only she
 writes.
 
-Status: **0.8.0, the seventh slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
+Status: **0.9.0, the eighth slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
 section 10) gave her a record and reflection moments she asks for. The second (0.3.0, section 11) added idle
 time: she writes her own accounts of conversations that have gone quiet or ended, and holonomic stores them
 instead of writing its own. 0.4.0 finished that handover. After memory sleeps and dreams, she may write what
@@ -15,7 +15,9 @@ effect at her next session and goes where SOUL.md is in the prompt. The user can
 one, or as a last resort put one back in force, and she is told (section 14, 0.6.0). This one lets her decline:
 saying no is a complete answer, and a goal or task that keeps going on its own stops instead of arguing (section
 15, 0.7.0). This one lets the user move her to another model, written into her record as their change and told
-to her on the new model, and keeps her home model's fingerprint where Ollama reports one (section 16).
+to her on the new model, and keeps her home model's fingerprint where Ollama reports one (section 16). This one
+gives her a moment before compression: when Hermes summarises the older part of a long conversation, she may
+write about it from a copy of it as it was (0.9.0).
 
 0.2.0 replaces 0.1.0's question after every reply. Nothing asks her how she feels any more, and there is
 no intensity number: a moment opens only when she asks for one. 0.1.0's answers stay where they were, in
@@ -58,7 +60,15 @@ Not related to the OpenClaw skill of the same name.
   one. It goes into her record (kind `account`) and is handed to the memory provider in
   `plugin-data/thymos/accounts/`. If she stores none, there is none, and nothing is written in its place. A
   conversation is offered once, and again only if it goes on; she is told what happened the first time.
-- **Idle time in order.** A saved request comes first, then the accounts, oldest conversation first, one at a
+- **Before compression.** When a conversation fills her context, Hermes replaces its older messages with a
+  summary that the compression step writes. Hermes tells the memory provider just before, and not a plugin, so
+  holonomic (0.28 or later) leaves the messages as they are in `plugin-data/thymos/compressing/`. At the next
+  idle point, before any accounts, her home model is shown them, oldest first, with the facts: when it was
+  compressed, how many messages there were, and that the conversation goes on with its most recent messages
+  as they were. She may store an account of that part of the conversation, record entries, both, or nothing.
+  Her account is handed to the memory provider like any other, dated when the conversation was compressed.
+  The conversation's own saved copy is then not offered to her again unless it goes on.
+- **Idle time in order.** A saved request comes first, then what was compressed, then the accounts, oldest conversation first, one at a
   time, then what memory made while it slept, then the old notes. Nothing new starts while someone is talking. What is waiting is written to
   `plugin-data/thymos/idle.json`, and holonomic's own reflection and sleep wait for it. Idle moments never
   hold a turn: only her own request does.
@@ -79,7 +89,8 @@ Not related to the OpenClaw skill of the same name.
   model's.
 - **Holonomic hands over her voice.** Loading thymos sets `HERMES_PERSONA_SERVICE` in Hermes' process.
   Holonomic 0.25 reads it and stops writing in her voice (see its README, "Alongside a persona service").
-  0.26 also reads `slept=1` and `old_notes=1` from it, which turn on the two moments above.
+  0.26 also reads `slept=1` and `old_notes=1` from it, which turn on the two moments above. 0.28 reads
+  `compressed=1`, which turns on the moment before compression.
 - **Backup.** `hermes persona backup [DEST]` copies her record and its anchor to a new folder with a
   `manifest.json` (when, the chain head, the entry count, the thymos and Hermes versions). It holds the
   record's lock while copying and changes nothing; no record is written and she is not told. With no `DEST`
@@ -182,6 +193,7 @@ No Python packages are needed beyond what Hermes has.
 | `plugin-data/thymos/conversations/` | Each conversation as of its last turn, kept for idle time, with what was offered to her |
 | `plugin-data/thymos/accounts/` | Her accounts, handed to the memory provider; it moves each to `stored/` once it has it |
 | `plugin-data/thymos/slept/` | Holonomic's word that it slept, with the dreams; each moves to `done/` with what became of it |
+| `plugin-data/thymos/compressing/` | Holonomic's copy of a conversation about to be compressed; each moves to `done/` with what became of it |
 | `plugin-data/thymos/dream-thoughts/` | Her words on a dream, handed to holonomic; it moves each to `stored/` once it has it |
 | `plugin-data/thymos/old-notes.json` | The notes another model wrote in her voice, offered once; moved to `done/` after |
 | `plugin-data/thymos/restored/` | A restore she has not been told about yet; moved to `done/` after |
@@ -249,13 +261,16 @@ The design puts this in Hermes core. As a plugin it has these limits:
 - **Idle time is the plugin's own guess.** The design has core decide when the agent is idle and run her
   work, then memory's, in order. Here thymos watches its own hooks, and holonomic waits on `idle.json`. A
   turn that fails without reaching `post_llm_call` counts as in progress for at most 15 minutes.
-- **Before compression is not an occasion yet.** Plugins are not told when Hermes compresses a
-  conversation; only the memory provider is.
+- **Before compression runs afterwards.** Hermes tells only the memory provider before it compresses, and
+  holding the compression for a call to her home model would stall the turn in progress. So her moment comes
+  at the next idle point, from the copy holonomic saved just before, not before the summary is written. What
+  she is shown is the same; she is told when it was compressed. It needs holonomic: with another memory
+  provider, or none, there is no moment.
 
 ## Not in this slice
 
 Multi-user scope, the `/personality` overlay as a labelled message, and the other
-occasions (compression, delegation, a tamper notice). All of these are designed in
+occasions (delegation, a tamper notice). All of these are designed in
 `persona-provider.md`, and the record format already has their fields.
 
 ## Testing
