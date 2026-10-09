@@ -11,7 +11,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 # Every field a record's hash covers (persona-provider.md, section 5).  The multi-user fields are written
 # empty for now; they are here so the record format does not change when those features arrive.
@@ -64,8 +64,10 @@ class _Lock:
 
 
 class Chain:
-    def __init__(self, path: Path, anchor_path: Path):
+    def __init__(self, path: Path, anchor_path: Path, digest: Optional[Callable[[str], str]] = None):
         self.path, self.anchor_path = Path(path), Path(anchor_path)
+        # Her home model's fingerprint for an entry she writes (persona-provider.md 9.5), given its model label.
+        self.digest = digest
 
     # -- reading ------------------------------------------------------------------------------------
     def _lines(self) -> List[str]:
@@ -116,6 +118,11 @@ class Chain:
                      at=float(fields.get("at") or time.time()),
                      prev_hash=existing[-1].get("hash", "") if existing else "")
         entry["shown_with"] = list(entry.get("shown_with") or [])
+        if self.digest is not None and entry["author"] == "self" and entry["model"] and not entry["model_digest"]:
+            try:
+                entry["model_digest"] = self.digest(entry["model"]) or ""
+            except Exception:
+                pass
         entry["hash"] = entry_hash(entry)
         with open(self.path, "a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")

@@ -22,6 +22,7 @@ def make(tmp_path, llm=None, soul="You are Athena. You keep your own counsel."):
     tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "SOUL.md").write_text(soul, encoding="utf-8")
     svc = Thymos(tmp_path, llm=llm or FakeLlm(), config={"hold_seconds": 5})
+    svc.fingerprinter = lambda provider, model: ""      # no model server in tests
     return svc
 
 

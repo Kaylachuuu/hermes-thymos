@@ -3,7 +3,7 @@
 Personality for [Hermes Agent](https://hermes-agent.nousresearch.com): a record of herself that only she
 writes.
 
-Status: **0.7.0, the sixth slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
+Status: **0.8.0, the seventh slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
 section 10) gave her a record and reflection moments she asks for. The second (0.3.0, section 11) added idle
 time: she writes her own accounts of conversations that have gone quiet or ended, and holonomic stores them
 instead of writing its own. 0.4.0 finished that handover. After memory sleeps and dreams, she may write what
@@ -14,7 +14,8 @@ damaged, which she is told about (section 13, 0.5.0). This one lets her revise h
 effect at her next session and goes where SOUL.md is in the prompt. The user can ask her to go back to an earlier
 one, or as a last resort put one back in force, and she is told (section 14, 0.6.0). This one lets her decline:
 saying no is a complete answer, and a goal or task that keeps going on its own stops instead of arguing (section
-15).
+15, 0.7.0). This one lets the user move her to another model, written into her record as their change and told
+to her on the new model, and keeps her home model's fingerprint where Ollama reports one (section 16).
 
 0.2.0 replaces 0.1.0's question after every reply. Nothing asks her how she feels any more, and there is
 no intensity number: a moment opens only when she asks for one. 0.1.0's answers stay where they were, in
@@ -138,7 +139,20 @@ Not related to the OpenClaw skill of the same name.
   It works on any model, since stopping is the safe direction, but a decline on another model is shown as that
   model's. Subagents don't have it. Her standing text says she may decline anyone, that declining is a complete
   answer, and that being asked to reconsider is a request.
-- **`hermes persona status`.** Prints her seed, home model, entry counts, the chain check, any pending
+- **`hermes persona home-model PROVIDER:MODEL [--reason TEXT]`** moves her to another model, for example
+  `ollama:gemma3:27b`. Her home model is the only one that writes in her record, and her reflection moments
+  run only on it. `/model` and the model setting never change it; this command does. It prints what changes
+  and asks before going ahead, then appends a `home_model` record, written by the user, with the old and new
+  model, their fingerprints where known, and your reason. It is in force at once. Until she is told, her
+  prompt says so; at the next quiet moment on the new model she is told, with your reason in your words, and
+  may record what she makes of it. Set Hermes' main model to the new one as well: until you do, status says the
+  configured model is not hers and names this command, and her moments wait.
+- **Fingerprints.** Where her home model runs on Ollama (or another local server that answers `/api/tags`),
+  the plugin asks for the model's digest. Her seed, a change of home model and every entry she writes record
+  it. If the files behind the same name change (an `ollama pull` that brought a new build, say), she is told
+  once at the next quiet moment, and status shows both fingerprints. Hosted APIs report only a name, and
+  nothing is asked of them.
+- **`hermes persona status`.** Prints her seed, home model (and its fingerprint), entry counts, the chain check, any pending
   reflection and how the last one went, the conversations waiting for idle time, how the last account
   moment went, how many of her accounts the memory provider has stored, and how the moments after memory
   slept, with the old notes, after a restore and in the moments about her identity went; and her identity in
@@ -172,7 +186,7 @@ No Python packages are needed beyond what Hermes has.
 | `plugin-data/thymos/old-notes.json` | The notes another model wrote in her voice, offered once; moved to `done/` after |
 | `plugin-data/thymos/restored/` | A restore she has not been told about yet; moved to `done/` after |
 | `self.replaced-<time>/` | Her record and anchor as they were before a restore. Never deleted by thymos |
-| `plugin-data/thymos/rollback/`, `overridden/`, `seed-changed/` | Moments about her identity waiting for idle time; each moves to `done/` |
+| `plugin-data/thymos/rollback/`, `overridden/`, `seed-changed/`, `home-model/` | Moments about her identity and her home model waiting for idle time; each moves to `done/` |
 | `plugin-data/thymos/slot-one.json` | Whether her identity was placed in slot one, at the start of the last session |
 | `plugin-data/thymos/idle.json` | What is waiting for idle time, rewritten every `poll_seconds`, for holonomic to wait on |
 
@@ -227,7 +241,11 @@ The design puts this in Hermes core. As a plugin it has these limits:
 - **The moment is one structured answer, not a fork with tools.** `ctx.llm` makes a single call with no
   tools, so she records entries as JSON rather than through `record_state`. It also runs on Hermes' main
   model setting, not the session's `/model`, which is why the answering model is checked.
-- **Fingerprints are not checked.** The record has `model_digest`, but this slice leaves it empty.
+- **A fingerprint is only as good as the server's.** It is Ollama's digest of the model files, asked for at
+  most every five minutes, at quiet moments and in status. It catches the accidental case. Someone who means
+  to can still change what runs; she is told when the fingerprint changes, but it cannot stop them.
+- **The home model is matched by name.** Hermes reports which model served each call, and the plugin compares
+  names the way providers spell them (case, an `ollama/` prefix and `:latest` don't count).
 - **Idle time is the plugin's own guess.** The design has core decide when the agent is idle and run her
   work, then memory's, in order. Here thymos watches its own hooks, and holonomic waits on `idle.json`. A
   turn that fails without reaching `post_llm_call` counts as in progress for at most 15 minutes.
@@ -236,7 +254,7 @@ The design puts this in Hermes core. As a plugin it has these limits:
 
 ## Not in this slice
 
-Multi-user scope, changing her home model, the `/personality` overlay as a labelled message, and the other
+Multi-user scope, the `/personality` overlay as a labelled message, and the other
 occasions (compression, delegation, a tamper notice). All of these are designed in
 `persona-provider.md`, and the record format already has their fields.
 
