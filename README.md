@@ -258,7 +258,10 @@ The design puts this in Hermes core. As a plugin it has these limits:
   (`due_prompt`, `status_line`, `resume`) when it loads. A Hermes update that
   renames them leaves her decline working in conversation but not stopping those loops; status still records
   it. A declined goal shows as paused, with her reason, because Hermes has no "declined" state. A heartbeat turn
-  is recognised by Hermes' "[Heartbeat" prefix on the message. Scheduled runs are not handled yet.
+  is recognised by Hermes' "[Heartbeat" prefix on the message. When a compression moves the conversation to a new
+  session id, Hermes moves the heartbeat with it, and her decline is found under the id it was made in. The
+  Desktop app's heartbeat card shows only "paused": it renders fixed fields with no place for a reason, so
+  `/heartbeat` in the chat is where her reason shows. Scheduled runs are not handled yet.
 - **A session start is the plugin's guess.** It is the first prompt built, or the first call, for a session
   id it has not seen. A run Hermes starts on its own also counts, so a revision can take effect, and stop
   being withdrawable, sooner than the next conversation.

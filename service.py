@@ -446,6 +446,19 @@ def _entries(raw: Any) -> Optional[List[Dict[str, Any]]]:
     return entries
 
 
+def _compressed_from(session_id: str) -> str:
+    """The session `session_id` continues after a compression, from Hermes' session store, or ""."""
+    try:
+        from hermes_cli.heartbeat import _get_session_db
+        db = _get_session_db()
+        row = db.get_session(session_id) if db is not None else None
+        parent = (row or {}).get("parent_session_id") or ""
+        prow = db.get_session(parent) if parent else None
+        return parent if (prow or {}).get("end_reason") == "compression" else ""
+    except Exception:
+        return ""
+
+
 class Thymos:
     def __init__(self, home: Union[Path, Callable[[], Path]], *, llm: Any = None,
                  config: Optional[Dict[str, Any]] = None):
@@ -472,6 +485,8 @@ class Thymos:
         self._delegations: Dict[str, List[Dict[str, Any]]] = {}
         # Her home model's fingerprint (models.py), asked for at most every few minutes.
         self.fingerprinter: Callable[[str, str], str] = mdl.fingerprint
+        # The session a compression continued from, or "" (Hermes' session store).  Replaced in tests.
+        self.compressed_from: Callable[[str], str] = _compressed_from
         self._prints: Dict[str, Tuple[str, float]] = {}
 
     # -- places ---------------------------------------------------------------------------------------
@@ -1749,7 +1764,24 @@ class Thymos:
     # A declined /heartbeat (declining.py), kept in state.json: the gateway's driver and a TUI may be other
     # managers, and the pause can come after the turn ended.
     def _heartbeat(self, session_id: str) -> Optional[Dict[str, Any]]:
-        return (self._state().get("declined_heartbeats") or {}).get(session_id)
+        """Her decline of this session's heartbeat.  A compression after it moves the conversation, and Hermes moves
+        the heartbeat with it, to a new session id: the decline is found under the id it was made in, and moved."""
+        found = (self._state().get("declined_heartbeats") or {}).get(session_id)
+        if found or not session_id:
+            return found
+        sid = session_id
+        for _ in range(5):
+            sid = self.compressed_from(sid)
+            if not sid:
+                return None
+            with self._lock:
+                state = self._state()
+                marks = state.get("declined_heartbeats") or {}
+                if sid in marks:
+                    marks[session_id] = marks.pop(sid)
+                    self._save_state(state)
+                    return marks[session_id]
+        return None
 
     def heartbeat_declined(self, session_id: str) -> Optional[Dict[str, Any]]:
         rec = self._heartbeat(session_id)

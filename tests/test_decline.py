@@ -229,3 +229,34 @@ def test_a_declined_heartbeat_pauses_and_resuming_is_asking_again(tmp_path):
     finally:
         restore(monkey)
         FakeHeartbeat.store.clear()
+
+
+def test_a_declined_heartbeat_is_still_paused_after_a_compression_moves_it(tmp_path):
+    monkey = {}
+    fake_hermes(monkey)
+    hb = types.ModuleType("hermes_cli.heartbeat")
+    hb.HeartbeatManager = FakeHeartbeat.HeartbeatManager
+    sys.modules["hermes_cli"].heartbeat = hb
+    monkey["hermes_cli.heartbeat"] = sys.modules.get("hermes_cli.heartbeat")
+    sys.modules["hermes_cli.heartbeat"] = hb
+    try:
+        svc = make(tmp_path)
+        declining.install(svc.declined, svc.acted_on_decline, {
+            "heartbeat": svc.heartbeat_declined, "heartbeat_paused": svc.heartbeat_paused,
+            "heartbeat_resumed": svc.heartbeat_resumed, "take_resumed": svc.take_resumed_heartbeat})
+        start(svc)
+        FakeHeartbeat.store["s1"] = FakeHeartbeat.State()
+        tick = hb.HeartbeatManager("s1").due_prompt()
+        svc.pre_llm_call(session_id="s1", model="gemma3:12b", platform="cli", user_message=tick)
+        svc.decline({"reason": "Not useful."}, session_id="s1")
+        turn_end(svc)
+        # Compressed after that turn: Hermes moves the heartbeat to the continuation, s2, and polls it there.
+        FakeHeartbeat.store["s2"] = FakeHeartbeat.store.pop("s1")
+        svc.compressed_from = lambda sid: "s1" if sid == "s2" else ""
+        driver = hb.HeartbeatManager("s2")
+        assert driver.due_prompt() is None and FakeHeartbeat.store["s2"].status == "paused"
+        assert driver.status_line().endswith('(declined by her: "Not useful.")')
+        assert svc._heartbeat("s1") is None and svc._heartbeat("s2")["paused"]
+    finally:
+        restore(monkey)
+        FakeHeartbeat.store.clear()
