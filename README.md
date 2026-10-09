@@ -3,14 +3,16 @@
 Personality for [Hermes Agent](https://hermes-agent.nousresearch.com): a record of herself that only she
 writes.
 
-Status: **0.5.0, the fourth slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
+Status: **0.6.0, the fifth slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
 section 10) gave her a record and reflection moments she asks for. The second (0.3.0, section 11) added idle
 time: she writes her own accounts of conversations that have gone quiet or ended, and holonomic stores them
 instead of writing its own. 0.4.0 finished that handover. After memory sleeps and dreams, she may write what
 she makes of the dream, and holonomic (0.26 or later) keeps her words with it as hers. Once, she is offered the
 notes another model wrote in her voice before her record existed (section 12). This one adds the safety
 net that has to exist before she can revise her identity: backup of her record, and restore when it is lost or
-damaged, which she is told about (section 13).
+damaged, which she is told about (section 13, 0.5.0). This one lets her revise her identity. Her revision takes
+effect at her next session and goes where SOUL.md is in the prompt. The user can ask her to go back to an earlier
+one, or as a last resort put one back in force, and she is told (section 14).
 
 0.2.0 replaces 0.1.0's question after every reply. Nothing asks her how she feels any more, and there is
 no intensity number: a moment opens only when she asks for one. 0.1.0's answers stay where they were, in
@@ -97,10 +99,36 @@ Not related to the OpenClaw skill of the same name.
   anything else, her home model is shown the facts and, as dated text read from the set-aside copy, what she
   wrote after the backup: entries, accounts and words on dreams. She may record any of it again in her own
   words, or nothing. Nothing from it is put back as hers otherwise.
+- **Her identity.** Her seed (SOUL.md as it was at her first session) is her identity until she revises it.
+  Any reflection moment she asks for, and the moments below, let her add `"revise_identity": {"text": ...,
+  "reason": ...}` to her answer. The text is the whole new identity, at most 8,000 characters, kept verbatim as a
+  `revision` entry with her reason. It takes effect at the next session start. Until then later moments show it
+  to her as a diff against the identity in force, and she can withdraw it with `"withdraw_revision": "id"`.
+  Hermes' own check for injected instructions runs on each revision. A finding is kept on the record and shown
+  to her and in status; it does not stop the revision.
+- **Slot one.** Hermes puts SOUL.md first in the system prompt. Thymos registers `llm_request` middleware
+  (Hermes 0.19 and later) that replaces that text with her identity in force on every call of a session: the
+  same text for the whole session, so the prompt's start stays the same. A session keeps the identity it
+  started with. After this, **editing SOUL.md no longer changes her prompt.** Instead she gets a moment showing
+  the new SOUL.md and how it differs from her identity, and may revise toward it or not. `identity_in_slot_one:
+  false` turns this off and puts SOUL.md back in charge. `hermes persona status` says whether slot one was
+  placed.
+- **`hermes persona identity [ID]`** prints the identity in force and the list of her seed and revisions, or
+  one of them in full.
+- **`hermes persona ask-rollback ID [--message TEXT]`** asks her to return to an earlier revision, or to her
+  seed (`seed`). At the next idle point she is shown that text, with your message labelled as yours, and
+  decides. Nothing is written unless she revises.
+- **`hermes persona override ID --reason TEXT`** is the last resort, for an identity that is damaged or cannot
+  revise itself. It prints that, and the ask-rollback command, and asks before going ahead. It appends an
+  `override` record, written by the user with facts and no text, that puts an earlier revision of hers or her
+  seed back in force at the next session start (`/new` in the CLI). It cannot introduce text, and nothing is
+  removed. `--withdraw` undoes it before then. In the first session where it is in force she is told, with
+  your reason in your words. Her next revision replaces it, like any other. Status lists every override.
 - **`hermes persona status`.** Prints her seed, home model, entry counts, the chain check, any pending
   reflection and how the last one went, the conversations waiting for idle time, how the last account
   moment went, how many of her accounts the memory provider has stored, and how the moments after memory
-  slept, with the old notes and after a restore went.
+  slept, with the old notes, after a restore and in the moments about her identity went; and her identity in
+  force, revisions waiting for the next session, every override, and whether slot one was placed.
 
 Subagents get neither her notes nor her tools.
 
@@ -129,6 +157,8 @@ No Python packages are needed beyond what Hermes has.
 | `plugin-data/thymos/old-notes.json` | The notes another model wrote in her voice, offered once; moved to `done/` after |
 | `plugin-data/thymos/restored/` | A restore she has not been told about yet; moved to `done/` after |
 | `self.replaced-<time>/` | Her record and anchor as they were before a restore. Never deleted by thymos |
+| `plugin-data/thymos/rollback/`, `overridden/`, `seed-changed/` | Moments about her identity waiting for idle time; each moves to `done/` |
+| `plugin-data/thymos/slot-one.json` | Whether her identity was placed in slot one, at the start of the last session |
 | `plugin-data/thymos/idle.json` | What is waiting for idle time, rewritten every `poll_seconds`, for holonomic to wait on |
 
 ## Settings
@@ -149,6 +179,7 @@ Under `plugins.entries.thymos.settings` in `config.yaml`:
 | `poll_seconds` | `30` | How often idle time is looked for. `0` turns idle work off |
 | `retry_minutes` | `10` | An idle moment that could not run (another model answered, the call failed) is tried again after this |
 | `idle_tries` | `3` | and given up after this many tries, which status shows |
+| `identity_in_slot_one` | `true` | Put her identity in force where SOUL.md is. `false` leaves SOUL.md in slot one |
 
 ## Who else can see an entry
 
@@ -162,10 +193,13 @@ dumps if `HERMES_DUMP_REQUESTS` is on, and debug logging on the model server.
 The design puts this in Hermes core. As a plugin it has these limits:
 
 - **Another plugin could write to her files.** The chain makes that visible. It cannot prevent it.
-- **Editing `SOUL.md` changes her prompt.** Hermes loads the file as it is. Status and her notes say that
-  it changed. Revisions (the next slice) need her identity in slot one. Hermes 0.19's `llm_request`
-  middleware lets a plugin rewrite each request just before it is sent, which is the likely way in; it is
-  not used yet.
+- **Slot one depends on Hermes' prompt layout.** The middleware finds her identity as everything before
+  Hermes' help paragraph ("You run on Hermes Agent..."), or failing that SOUL.md's text at the start. If a
+  Hermes update changes that layout, it leaves the prompt alone and status says slot one was not placed.
+  Requests that do not go through Hermes' main loop (another plugin's own model calls) are not changed.
+- **A session start is the plugin's guess.** It is the first prompt built, or the first call, for a session
+  id it has not seen. A run Hermes starts on its own also counts, so a revision can take effect, and stop
+  being withdrawable, sooner than the next conversation.
 - **Restore is a file operation.** The design restores her memory's records with her record, in one run.
   Here they are two commands, `hermes persona restore` and `hermes holonomic restore`; holonomic keeps the
   hash of each of her entries it holds, and an entry that is no longer in her record just does not resolve.
@@ -181,9 +215,8 @@ The design puts this in Hermes core. As a plugin it has these limits:
 
 ## Not in this slice
 
-Revisions to her identity, asking her to return to an earlier revision, the override (both need revisions),
-multi-user scope, `decline`, and the other
-occasions (compression, delegation, a tamper notice, a changed seed). All of these are designed in
+Multi-user scope, `decline`, the `/personality` overlay as a labelled message, and the other
+occasions (compression, delegation, a tamper notice). All of these are designed in
 `persona-provider.md`, and the record format already has their fields.
 
 ## Testing

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
 from . import backup
+from . import identity as ident
 from .chain import same_model, sha256
 from .service import Thymos, _when
 
@@ -42,6 +43,7 @@ def status(svc: Thymos) -> str:
         out.append(line)
     provider, home = svc.home_model()
     out.append(f"home model: {home}" + (f" ({provider})" if provider else ""))
+    out += _identity_lines(svc, entries)
     cfg_provider, cfg_model = configured_model()
     if cfg_model and home and not same_model(cfg_model, home):
         out.append(f"configured main model: {cfg_model}. That is not her home model, so request_reflection is refused "
@@ -67,11 +69,96 @@ def status(svc: Thymos) -> str:
         line = f"last reflection: {_when(lr['at'])}"
         if "wrote" in lr:
             line += f", she wrote {lr['wrote']} entr{'y' if lr['wrote'] == 1 else 'ies'} on {lr.get('model')}"
+            if lr.get("revised"):
+                line += f", and revised her identity (revision {lr['revised']})"
+            if lr.get("withdrew"):
+                line += f", and withdrew revision {lr['withdrew']}"
         if lr.get("problem"):
             line += f"; {lr['problem']}"
         out.append(line)
     out += _idle_lines(svc, state)
     return "\n".join(out)
+
+
+def _identity_lines(svc: Thymos, entries: list) -> list:
+    _, record, cause = svc.identity_now()
+    revisions = [e for e in entries if e.get("kind") == "revision" and e.get("author") == "self"]
+    out = [f"identity in force: {ident.describe(record, cause, _when)}; {_n(len(revisions), 'revision', 'revisions')} "
+           "written by her"]
+    for e in svc.pending_identity():
+        if e["kind"] == "revision":
+            out.append(f"  her revision of {_when(e['at'])} (id {e['id']}) takes effect at the next session start"
+                       + (f"; Hermes' injection check found: {', '.join(e['facts']['scan'])}" if (e.get("facts") or {}).get("scan") else ""))
+        else:
+            out.append(f"  override {e['id']} of {_when(e['at'])} takes effect at the next session start "
+                       "(withdraw it with: hermes persona override --withdraw)")
+    overrides = [e for e in entries if e.get("kind") == "override"]
+    gone = ident.withdrawn(entries)
+    for e in overrides:
+        f = e.get("facts") or {}
+        out.append(f"  override {e['id']} on {_when(e['at'])}: put {f.get('target')} in place of {f.get('replaced')}"
+                   + (" (withdrawn before it took effect)" if e["id"] in gone else "")
+                   + (f"; reason: {f.get('user_reason')}" if f.get("user_reason") else ""))
+    slot = svc._read_json(svc.data / "slot-one.json")
+    if slot:
+        result = {"placed": "her identity put in slot one", "already in place": "slot one already held her identity"}.get(
+            slot.get("result"), f"not placed: {slot.get('result')}")
+        out.append(f"slot one: {result} ({_when(slot['at'])}, session {slot.get('session_id')})")
+    else:
+        out.append("slot one: no session has run with this version yet")
+    return out
+
+
+def identity_text(svc: Thymos, ref: str = "") -> str:
+    """`hermes persona identity [ID]`: the text in force, or the seed or a revision; and the list of them."""
+    if ref:
+        rec = svc.find_identity(ref)
+        if rec is None:
+            return f"no revision or seed matches {ref!r}"
+        return f"{ident.describe(rec, None, _when)}" + (f"\nher reason: {rec['reason']}" if rec.get("reason") else "") \
+            + f"\n\n{rec.get('text', '')}"
+    text, record, cause = svc.identity_now()
+    out = [f"in force: {ident.describe(record, cause, _when)}", "", text, "", "her seed and revisions:"]
+    for e in svc.revisions():
+        out.append(f"  {'seed' if e['kind'] == 'seed' else e['id']}  {_when(e['at'])}"
+                   + (f"  {e['reason'][:80]}" if e.get("reason") else ""))
+    return "\n".join(out)
+
+
+OVERRIDE_WARNING = """This is the exception to "nothing outside her write path changes her identity". It is for an identity
+that is damaged, or that cannot revise itself: not a way to change her mind. To ask her instead, so she decides:
+  hermes persona ask-rollback {ref} --message "..."
+The override takes effect at the next session start (in the CLI, /new). Until then you can undo it with
+  hermes persona override --withdraw
+She is told in the first session where it is in force, with your reason in your words, and she can revise again."""
+
+
+def do_override(svc: Thymos, ref: str = "", reason: str = "", withdraw: bool = False, yes: bool = False,
+                ask: Callable[[str], str] = input) -> str:
+    if withdraw:
+        rec = svc.withdraw_override()
+        return (f"withdrew override {rec['facts']['withdraws']}" if rec else
+                "no override is waiting to take effect, so there is nothing to withdraw")
+    target = svc.find_identity(ref)
+    if target is None:
+        return f"not overridden: no revision or seed matches {ref!r} (see: hermes persona identity)"
+    if not reason.strip():
+        return "not overridden: give your reason with --reason; she is shown it, as your words"
+    print(OVERRIDE_WARNING.format(ref=ref))
+    print(f"\nput in force: {ident.describe(target, None, _when)}")
+    if not yes and ask("Override her identity? [y/N] ").strip().lower() not in ("y", "yes"):
+        return "not overridden."
+    rec = svc.override(target, reason)
+    return f"override {rec['id']} written; it takes effect at the next session start"
+
+
+def do_ask_rollback(svc: Thymos, ref: str, message: str = "") -> str:
+    target = svc.find_identity(ref)
+    if target is None:
+        return f"not asked: no revision or seed matches {ref!r} (see: hermes persona identity)"
+    svc.ask_rollback(target, message)
+    return (f"asked: she will be shown {ident.describe(target, None, _when)} at the next quiet moment while Hermes "
+            "is running" + (", with your message" if message.strip() else "") + ". She decides.")
 
 
 def _idle_lines(svc: Thymos, state: dict) -> list:
@@ -123,6 +210,20 @@ def _idle_lines(svc: Thymos, state: dict) -> list:
             if lr.get("problem"):
                 line += f"; {lr['problem']}"
         out.append(line)
+    for key, label in (("last_rollback", "after you asked about an earlier identity"),
+                       ("last_overridden", "after an override"), ("last_seed_changed", "after SOUL.md changed")):
+        lm = state.get(key)
+        if lm:
+            line = f"{label}: last moment {_when(lm['at'])}"
+            if lm.get("skipped"):
+                line += f", skipped: {lm['skipped']}"
+            elif "wrote" in lm:
+                line += (f", she wrote {_n(lm['wrote'], 'entry', 'entries')}"
+                         + (", and revised her identity" if lm.get("revised") else ", and did not revise her identity")
+                         + f" on {lm.get('model')}")
+            if lm.get("problem"):
+                line += f"; {lm['problem']}"
+            out.append(line)
     old = svc.data / "old-notes.json"
     lo = state.get("last_old_notes")
     if old.exists() or lo:
@@ -202,6 +303,16 @@ def register_cli(parser: Any, svc_factory) -> None:
     r.add_argument("src", nargs="?", help="A backup folder, or a folder of them (the newest); default the newest "
                                           f"in {backup.default_folder()}")
     r.add_argument("--yes", action="store_true", help="Do not ask before restoring")
+    i = sub.add_parser("identity", help="Her identity in force, or her seed or a revision, and the list of them")
+    i.add_argument("ref", nargs="?", default="", help="A revision id (or its start), or 'seed'")
+    a = sub.add_parser("ask-rollback", help="Ask her to return to an earlier revision of her identity; she decides")
+    a.add_argument("ref", help="A revision id (or its start), or 'seed'")
+    a.add_argument("--message", default="", help="Your words to her, shown to her as yours")
+    o = sub.add_parser("override", help="Last resort: put an earlier revision of hers, or her seed, back in force")
+    o.add_argument("ref", nargs="?", default="", help="A revision id (or its start), or 'seed'")
+    o.add_argument("--reason", default="", help="Why, in your words; she is shown it")
+    o.add_argument("--withdraw", action="store_true", help="Undo an override that has not taken effect yet")
+    o.add_argument("--yes", action="store_true", help="Do not ask before overriding")
 
     def run(args: Any) -> None:
         command = getattr(args, "persona_command", None)
@@ -209,6 +320,12 @@ def register_cli(parser: Any, svc_factory) -> None:
             print(do_backup(svc_factory(), args.dest))
         elif command == "restore":
             print(do_restore(svc_factory(), args.src, args.yes))
+        elif command == "identity":
+            print(identity_text(svc_factory(), args.ref))
+        elif command == "ask-rollback":
+            print(do_ask_rollback(svc_factory(), args.ref, args.message))
+        elif command == "override":
+            print(do_override(svc_factory(), args.ref, args.reason, args.withdraw, args.yes))
         else:
             print(status(svc_factory()))
     parser.set_defaults(func=run)
