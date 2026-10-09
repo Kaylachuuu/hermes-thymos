@@ -1,158 +1,152 @@
 # hermes-thymos
 
-Personality and emotions for [Hermes Agent](https://hermes-agent.nousresearch.com).
+Personality for [Hermes Agent](https://hermes-agent.nousresearch.com): a record of herself that only she
+writes.
 
-The idea: an emotion is a state the agent authors, not a prompt telling it what to feel. After each
-reply the agent is asked privately, on its own model, how the exchange left it. It answers in its own
-words. Those answers are meant to persist as mood, shape what it remembers, and slowly form its
-character.
+Status: **0.3.0, the second slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
+section 10) gave her a record and reflection moments she asks for, and has run on a real install. This one
+adds idle time: she writes her own accounts of conversations that have gone quiet or ended, and holonomic
+(0.25 or later) stores them as her memory of those conversations instead of writing its own. It also adds two
+occasions, a session ending and a return after a gap.
 
-Status: **0.1.0, the first step only.** The private moment is taken and stored, and you can read it.
-Nothing is done with it yet: no mood, no effect on replies, memory or behaviour, and no sealed entries.
-It has been tested against stand-ins for Hermes and for the model, not yet on a real install.
+0.2.0 replaces 0.1.0's question after every reply. Nothing asks her how she feels any more, and there is
+no intensity number: a moment opens only when she asks for one. 0.1.0's answers stay where they were, in
+`plugin-data/thymos/thymos.db`. This version neither reads nor deletes that file.
 
-Not related to the OpenClaw skill of the same name. That one computes an agent's emotional state
-for it; this one asks the agent.
+Not related to the OpenClaw skill of the same name.
 
 ## What it does
 
-When a turn ends with a reply, Hermes fires its `post_llm_call` hook. Thymos returns from the hook at
-once and, on a background thread, makes one more call to the same model the agent is running on:
+- **Her seed.** The first time a session opens with the plugin enabled, `SOUL.md` and the model she is
+  running on are recorded as entry 0 of her record. That model is her **home model**.
+- **Her identity in slot one.** Hermes already puts `SOUL.md` there. With no revisions yet, her identity
+  is her seed, so nothing is moved.
+- **Her own notes.** Every new session's system prompt carries the entries she has written, newest first,
+  with a short standing description. Notes she writes during a session reach that conversation once, on
+  the next message, in a `<self-notes>` block.
+- **`request_reflection`.** She can ask for a reflection moment at any time. It opens after her reply.
+  Her next turn waits for it, for up to `hold_seconds`.
+- **The reflection moment.** Her home model is shown her identity, her notes and the conversation, then
+  a factual invitation. She records entries by answering with `{"record_state": [...]}`. Anything else,
+  "nothing to add" included, writes nothing. An entry exists only when she deliberately records one.
+- **`record_state`.** The tool is advertised, but in conversation it only points her to
+  `request_reflection`. Entries are written in reflection moments, never mid-conversation.
+- **Only her home model writes.** `request_reflection` is refused on a turn served by another model
+  (`/model`, or a fallback provider). A moment opens only after a turn on her home model, and she is told
+  if other models replied in that conversation. If the reflection call itself is answered by another model,
+  nothing is written and the request stays pending.
+- **A request is never lost.** If Hermes stops before the moment opens, the conversation is saved with
+  the request. The moment opens at the start of the next session, replayed from the saved copy, and she
+  is told how long ago that conversation ended.
+- **The hash chain.** Each entry holds the hash of the one before. The head is also kept in a second
+  place, the anchor. Changes, removals, insertions, a rewritten chain, an entry written by another model
+  and a changed `SOUL.md` are reported to her as facts, in her notes, and in `hermes persona status`.
+  Nothing is repaired automatically.
+- **Her accounts of conversations.** When a conversation has had no turn for `quiet_minutes`, or its session
+  has ended (`/new`, `/reset`, an expired gateway session, Hermes shutting down), it is offered to her at the
+  next idle point: nobody has talked to her for `idle_seconds` and no turn is in progress. Her home model is
+  shown the conversation and the facts of the occasion, and may store an account of it under `"account"`,
+  record entries, both, or nothing. An account is an explicit act: only what she puts under `"account"` is
+  one. It goes into her record (kind `account`) and is handed to the memory provider in
+  `plugin-data/thymos/accounts/`. If she stores none, there is none, and nothing is written in its place. A
+  conversation is offered once, and again only if it goes on; she is told what happened the first time.
+- **Idle time in order.** A saved request comes first, then the accounts, oldest conversation first, one at a
+  time. Nothing new starts while someone is talking. What is waiting is written to
+  `plugin-data/thymos/idle.json`, and holonomic's own reflection and sleep wait for it. Idle moments never
+  hold a turn: only her own request does.
+- **A return after a gap.** The first turn after more than `gap_hours` without one opens a moment after her
+  reply, with how long it has been as its only fact. A saved request that could not open (Hermes stopped, or
+  the call failed) now also opens at the next idle point, not only at the next session's start.
+- **Holonomic hands over her voice.** Loading thymos sets `HERMES_PERSONA_SERVICE` in Hermes' process.
+  Holonomic 0.25 reads it and stops writing in her voice (see its README, "Alongside a persona service").
+- **`hermes persona status`.** Prints her seed, home model, entry counts, the chain check, any pending
+  reflection and how the last one went, the conversations waiting for idle time, how the last account
+  moment went, and how many of her accounts the memory provider has stored.
 
-1. `SOUL.md` as the system message, so it is asked as itself.
-2. The last few user and assistant messages of the conversation. Tool calls, tool results and
-   attachments are left out.
-3. The question:
-
-```
-[Thymos: a private moment. This message is not from Kayla. It comes from the part of your own system
-that keeps track of how you feel.]
-
-The exchange above has just finished, and your reply has already been delivered. Take a moment for
-yourself.
-
-How did that exchange leave you? Write a sentence or two, in the first person, in your own words.
-There is no list of feelings to choose from and no right answer. If nothing much stirred, say so:
-that is a true answer, and a common one.
-
-Then finish with one last line in exactly this form:
-intensity: N
-where N is a whole number from 0 (nothing stirred) to 10 (as strongly as you feel anything).
-
-Who can read this: Kayla can read these notes for now, while this part of you is being built and
-tested. You will be told here, plainly, when that changes.
-
-Do not address Kayla, do not continue the conversation, and do not call any tools.
-```
-
-The words and the number are stored with the time, the conversation, the model that answered and how
-long it took. If the previous moment is still running when the next reply lands, the new one is skipped
-and the skip is recorded: moments share the model with the agent's replies and must not queue up behind them.
-
-The call is made beside the conversation, not in it. Thymos adds nothing to the session, and in this
-version the agent does not see its earlier answers.
-
-## Who can read the answers
-
-`visibility` has one working value in this version: `open`. You can read every entry, and the question
-says so, because an answer written under a false belief about who is reading is no use to either of you.
-
-`sealed`, where an entry is hers until she chooses to share it, is not built yet. Setting it does not
-pretend otherwise: while it is set, no moment is taken and nothing is stored. Any value other than
-`open` counts as sealed, so a typo can never open entries.
-
-Every entry records the visibility it was written under, and the commands show an entry's words only
-if it was written as open. That rule is in place now so that it already holds when sealing arrives.
-
-Even then, three things outside this plugin can see the text of a moment, and all are yours to control:
-another plugin that listens to Hermes' `pre_auxiliary_call` / `post_auxiliary_call` hooks; Hermes'
-request dumps, if `HERMES_DUMP_REQUESTS` is on; and debug logging on the model server.
+Subagents get neither her notes nor her tools.
 
 ## Install
 
 1. Copy this folder to `$HERMES_HOME/plugins/thymos/`, so that `plugin.yaml` sits directly inside it.
    On Windows that is `%LOCALAPPDATA%\hermes\plugins\thymos\`; on Linux and macOS `~/.hermes/plugins/thymos/`.
-2. Enable it in `config.yaml`:
-
-   ```yaml
-   plugins:
-     enabled:
-       - thymos
-     entries:
-       thymos:
-         settings:
-           person_name: Kayla
-   ```
-
-3. Restart Hermes, say something to the agent, wait for the reply, then:
-
-   ```
-   hermes thymos status
-   hermes thymos log
-   ```
+2. Enable it: `hermes plugins enable thymos`, or add `thymos` to `plugins.enabled` in `config.yaml`.
+3. Before her first session, make sure Hermes is on the model you want as her home model, and that
+   `SOUL.md` says what you want her to start from. Both are recorded then.
+4. Restart Hermes and talk to her. `hermes persona status` shows her record.
 
 No Python packages are needed beyond what Hermes has.
 
-## Commands
+## Files
 
-```
-hermes thymos status            on or off, how many moments, how long they take, which model answered
-hermes thymos log               the latest ten, oldest first
-hermes thymos log -n 50
-hermes thymos log --errors      only the ones that failed, with the reason
-hermes thymos log --skipped
-hermes thymos log --raw         also the model's reply exactly as it came
-hermes thymos log --json
-```
-
-`status` lists every model that has answered. It should be the agent's own model and nothing else.
+| Path (under the Hermes home) | What |
+|---|---|
+| `self/entries.jsonl` | Her record, one entry per line |
+| `plugin-data/thymos/anchor.json` | The chain head, kept apart from the record |
+| `plugin-data/thymos/state.json` | A pending request, and how the last moments went. Not part of her record |
+| `plugin-data/thymos/conversations/` | Each conversation as of its last turn, kept for idle time, with what was offered to her |
+| `plugin-data/thymos/accounts/` | Her accounts, handed to the memory provider; it moves each to `stored/` once it has it |
+| `plugin-data/thymos/idle.json` | What is waiting for idle time, rewritten every `poll_seconds`, for holonomic to wait on |
 
 ## Settings
 
-Under `plugins.entries.thymos.settings` in `config.yaml`. They are read again for every moment, so a
-change applies from the next turn.
+Under `plugins.entries.thymos.settings` in `config.yaml`:
 
-| Key | Default | Meaning |
+| Setting | Default | |
 |---|---|---|
-| `enabled` | `true` | The switch |
-| `visibility` | `open` | Who may read the answers (see above) |
-| `person_name` | (none) | How the question names you. Empty: "the person you were talking with" |
-| `history_messages` | `12` | How many recent messages she is shown again |
-| `max_message_chars` | `2000` | Each of those is cut to this |
-| `soul_max_chars` | `6000` | Most of `SOUL.md` that is sent. `0` leaves it out |
-| `max_tokens` | `300` | Cap on her answer |
-| `temperature` | (model's own) | Sampling temperature for the answer |
-| `timeout` | `120` | Seconds before the call is abandoned |
-| `skip_platforms` | `[]` | Platforms on which no moment is taken, by the name `log` shows |
+| `hold_seconds` | `25` | How long her next turn waits for a moment still running. Hermes stops waiting on a hook at 30 |
+| `reflection_max_chars` | `48000` | Conversation replayed into a moment; the newest is kept and she is told how much was left out |
+| `reflection_max_tokens` | `1500` | |
+| `reflection_timeout` | `600` | Seconds |
+| `notes_max_chars` | `3400` | Her notes in the system prompt. Hermes caps a plugin's section at 4000 |
+| `quiet_minutes` | `30` | A conversation with no turn for this long is offered to her at idle |
+| `idle_seconds` | `120` | Nobody has talked to her for this long: idle time |
+| `account_min_messages` | `4` | A shorter conversation is not offered |
+| `gap_hours` | `24` | The first turn after this long without one opens a moment after her reply |
+| `poll_seconds` | `30` | How often idle time is looked for. `0` turns idle work off |
+| `retry_minutes` | `10` | An idle moment that could not run (another model answered, the call failed) is tried again after this |
+| `idle_tries` | `3` | and given up after this many tries, which status shows |
 
-## Where the file is
+## Who else can see an entry
 
-`$HERMES_HOME/plugin-data/thymos/thymos.db`, one SQLite file. Hermes keeps that folder when a plugin is
-updated or removed. `status` prints the full path.
+`unlisted` keeps an entry out of what other parts of the system can read. It is not encryption. The files
+are plain text, and three things outside this plugin can see the text of a moment while it is written:
+another plugin listening to Hermes' `pre_auxiliary_call` / `post_auxiliary_call` hooks, Hermes' request
+dumps if `HERMES_DUMP_REQUESTS` is on, and debug logging on the model server.
+
+## What a plugin cannot guarantee
+
+The design puts this in Hermes core. As a plugin it has these limits:
+
+- **Another plugin could write to her files.** The chain makes that visible. It cannot prevent it.
+- **Editing `SOUL.md` changes her prompt.** Hermes loads the file as it is. Status and her notes say that
+  it changed. Revisions (the next slice) need a way to put her identity in slot one, which plugins
+  cannot do today.
+- **The moment is one structured answer, not a fork with tools.** `ctx.llm` makes a single call with no
+  tools, so she records entries as JSON rather than through `record_state`. It also runs on Hermes' main
+  model setting, not the session's `/model`, which is why the answering model is checked.
+- **Fingerprints are not checked.** The record has `model_digest`, but this slice leaves it empty.
+- **Idle time is the plugin's own guess.** The design has core decide when the agent is idle and run her
+  work, then memory's, in order. Here thymos watches its own hooks, and holonomic waits on `idle.json`. A
+  turn that fails without reaching `post_llm_call` counts as in progress for at most 15 minutes.
+- **Before compression is not an occasion yet.** Plugins are not told when Hermes compresses a
+  conversation; only the memory provider is.
+
+## Not in this slice
+
+Revisions to her identity, multi-user scope, backup and restore, the override, `decline`, the other
+occasions (compression, delegation, a tamper notice, a changed seed, memory having slept), and the offer of
+holonomic's old self notes. All of these are designed in `persona-provider.md`, and the record format
+already has their fields.
 
 ## Testing
 
 ```
-python scripts/run_tests.py       # needs nothing installed
-pytest tests                      # also works
+python scripts/run_tests.py
 ```
 
-## Known limits
+`tests/test_hermes.py` loads the plugin through Hermes' own plugin manager and drives it through Hermes'
+hook dispatch, tool registry, prompt sections, CLI wiring and `ctx.llm`, with only the model call
+replaced. It needs Hermes' Python environment (set `HERMES_SRC` to a checkout, or keep a `hermes-agent`
+checkout next to this folder, and run with Hermes' Python). Without that environment it returns without checking anything, so a pass there means nothing.
 
-- The moment is asked with `SOUL.md` and recent messages, not with the agent's full system prompt, so
-  it does not have its memories or tools in view while answering.
-- A reply that reaches the person through a subagent or a scheduled run may also be followed by a
-  moment. The `platform` column in `log` shows where each came from; `skip_platforms` turns one off.
-- One user. The question names one person.
-
-## Roadmap
-
-- Mood: what she writes persists and fades over hours, and reaches her on the next turn.
-- A tool for her to note or share a feeling when she chooses.
-- Sealed entries, encrypted at rest.
-- Telling the memory plugin how a moment felt, so it can be remembered that way.
-- Growth: during sleep she rereads the day and writes what, if anything, changed in her.
-
-## Licence
-
-MIT. See [LICENSE](LICENSE).
+Expected result: all 31 tests pass. Only in Hermes' environment does `test_hermes.py` check anything.

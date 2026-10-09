@@ -1,93 +1,103 @@
-"""``hermes thymos ...``: read what she has written, and check that moments are being taken."""
-
+"""`hermes persona status`: what her record holds and whether it checks out.  Reads only."""
 from __future__ import annotations
 
-import argparse
-import json
-import textwrap
-import time
-from typing import Any, Callable, Dict, List
+from collections import Counter
+from typing import Any, Tuple
 
-from . import config as _config
-from .store import ERROR, FELT, SKIPPED
-
-USAGE = "usage: hermes thymos {status,log}"
+from .chain import same_model, sha256
+from .service import Thymos, _when
 
 
-def setup(subparser: argparse.ArgumentParser) -> None:
-    subs = subparser.add_subparsers(dest="thymos_command")
-    subs.add_parser("status", help="Whether moments are being taken, how many, and how long they take")
-    log = subs.add_parser("log", help="The latest moments, oldest first")
-    log.add_argument("-n", "--limit", type=int, default=10, help="How many to show (default 10)")
-    log.add_argument("--errors", action="store_true", help="Only the moments that failed")
-    log.add_argument("--skipped", action="store_true", help="Only the moments that were skipped")
-    log.add_argument("--raw", action="store_true", help="Also show the model's reply exactly as it came")
-    log.add_argument("--json", action="store_true", help="Print as JSON")
+def configured_model() -> Tuple[str, str]:
+    try:
+        from hermes_cli.config import load_config_readonly
+        model = (load_config_readonly() or {}).get("model") or {}
+    except Exception:
+        return "", ""
+    if isinstance(model, str):
+        return "", model
+    return str(model.get("provider") or ""), str(model.get("default") or model.get("model") or "")
 
 
-def make_handler(thymos: Any) -> Callable[[argparse.Namespace], int]:
-    def handler(args: argparse.Namespace) -> int:
-        command = getattr(args, "thymos_command", None)
-        if command == "status":
-            print(status_text(thymos.config(), thymos.store().summary(), str(thymos.store().path)))
-            return 0
-        if command == "log":
-            only = ERROR if args.errors else SKIPPED if args.skipped else None
-            rows = thymos.store().recent(args.limit, status=only)
-            print(json.dumps(rows, indent=2, ensure_ascii=False) if args.json else log_text(rows, raw=args.raw))
-            return 0
-        print(USAGE)
-        return 2
-    return handler
-
-
-def _when(stamp: float) -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stamp))
-
-
-def status_text(cfg: Dict[str, Any], summary: Dict[str, Any], path: str) -> str:
-    lines: List[str] = []
-    if not cfg["enabled"]:
-        lines.append("Thymos is switched off (enabled: false). No moments are being taken.")
-    elif cfg["visibility"] != _config.OPEN:
-        lines.append("Visibility is set to sealed. Sealed entries are not built in this version, so no "
-                     "moments are being taken. Set visibility to open to take them.")
+def status(svc: Thymos) -> str:
+    entries = svc.chain.entries()
+    if not entries:
+        return ("thymos: no record yet. It starts with her seed the first time a session opens with the plugin "
+                f"enabled.\nrecord: {svc.chain.path}")
+    out = [f"record: {svc.chain.path}", f"anchor: {svc.chain.anchor_path}"]
+    seed = next((e for e in entries if e.get("kind") == "seed"), None)
+    soul = svc.soul()
+    if seed is not None:
+        f = seed.get("facts", {})
+        line = f"seed: {_when(seed['at'])}, SOUL.md sha256 {str(f.get('soul_sha256'))[:12]}"
+        if soul is not None and sha256(soul) != f.get("soul_sha256"):
+            line += (f"; SOUL.md has changed since (now {sha256(soul)[:12]}). Hermes loads the file as it is now, "
+                     "so the change is in her prompt")
+        out.append(line)
+    provider, home = svc.home_model()
+    out.append(f"home model: {home}" + (f" ({provider})" if provider else ""))
+    cfg_provider, cfg_model = configured_model()
+    if cfg_model and home and not same_model(cfg_model, home):
+        out.append(f"configured main model: {cfg_model}. That is not her home model, so request_reflection is refused "
+                   "and no reflection moment opens on it. Changing her home model is not in this version.")
+    kinds = Counter(e.get("kind") for e in entries)
+    notes = svc.notes()
+    out.append(f"entries: {len(entries)} ({', '.join(f'{k} {n}' for k, n in sorted(kinds.items()))})"
+               + (f", her last note {_when(notes[-1]['at'])}" if notes else ""))
+    notices = svc.chain.verify(soul_text=soul)
+    head = entries[-1].get("hash", "")[:12]
+    tamper = [n for n in notices if n["problem"] != "seed_changed"]
+    if tamper:
+        out.append(f"chain: {len(tamper)} problem(s), head {head}")
+        out += [f"  - {n['problem']}: {n['detail']}" for n in tamper]
     else:
-        lines.append("Thymos is on. Moments are open: she is told that you can read them.")
-    lines.append(f"Stored in:   {path}")
-    lines.append(f"Moments:     {summary['felt']} felt, {summary['errors']} failed, {summary['skipped']} skipped")
-    if summary["felt"]:
-        lines.append(f"Last one:    {_when(summary['last_felt_at'])}")
-        lines.append(f"Time taken:  {summary['average_ms'] / 1000:.1f} s on average")
-        if summary["average_intensity"] is not None:
-            lines.append(f"Intensity:   {summary['average_intensity']:.1f} on average (0 to 10)")
-        if summary["without_number"]:
-            lines.append(f"No number:   {summary['without_number']} answered in words but gave no intensity line")
-        if summary["models"]:
-            lines.append(f"Answered by: {', '.join(summary['models'])}")
-            if len(summary["models"]) > 1:
-                lines.append("             More than one model has answered. The first listed is the latest.")
-    return "\n".join(lines)
+        out.append(f"chain: verified, head {head}, anchor matches")
+    state = svc._state()
+    pending = state.get("pending")
+    out.append("pending reflection: " + (f"asked for {_when(pending['requested_at'])} in session {pending.get('session_id')}"
+                                         if pending else "none"))
+    lr = state.get("last_reflection")
+    if lr:
+        line = f"last reflection: {_when(lr['at'])}"
+        if "wrote" in lr:
+            line += f", she wrote {lr['wrote']} entr{'y' if lr['wrote'] == 1 else 'ies'} on {lr.get('model')}"
+        if lr.get("problem"):
+            line += f"; {lr['problem']}"
+        out.append(line)
+    out += _idle_lines(svc, state)
+    return "\n".join(out)
 
 
-def log_text(rows: List[Dict[str, Any]], *, raw: bool = False) -> str:
-    if not rows:
-        return "Nothing yet."
-    out: List[str] = []
-    for row in rows:
-        head = f"#{row['id']}  {_when(row['created_at'])}"
-        if row["platform"]:
-            head += f"  {row['platform']}"
-        if row["status"] == FELT:
-            head += "  intensity " + ("-" if row["intensity"] is None else f"{row['intensity']:g}")
-            head += f"  {row['duration_ms'] / 1000:.1f} s"
-        else:
-            head += f"  {row['status'].upper()}: {row['note']}"
-        out.append(head)
-        if row["status"] == FELT:
-            body = row["words"] if row["readable"] else "(sealed: hers until she shares it)"
-            out.append(textwrap.indent(body, "    "))
-        if raw and row["readable"] and row["raw"] and row["raw"].strip() != row["words"].strip():
-            out.append(textwrap.indent("as it came:\n" + row["raw"].strip(), "      "))
-        out.append("")
-    return "\n".join(out).rstrip()
+def _idle_lines(svc: Thymos, state: dict) -> list:
+    """Idle time: conversations waiting to be offered to her, and what became of her accounts."""
+    out = []
+    convs = svc.conversations()
+    due = svc.due_conversations()
+    out.append(f"conversations kept for idle time: {len(convs)}, {len(due)} waiting to be offered to her")
+    la = state.get("last_account")
+    if la:
+        line = f"last account moment: {_when(la['at'])}, conversation {la.get('session_id')}"
+        if "account" in la:
+            line += (", she stored an account" if la["account"] else ", she stored no account")
+            if la.get("wrote"):
+                line += f" and {la['wrote']} entr{'y' if la['wrote'] == 1 else 'ies'}"
+            line += f" on {la.get('model')}"
+        if la.get("problem"):
+            line += f"; {la['problem']}"
+        out.append(line)
+    folder = svc.data / "accounts"
+    waiting = len(list(folder.glob("*.json"))) if folder.exists() else 0
+    stored = len(list((folder / "stored").glob("*.json"))) if (folder / "stored").exists() else 0
+    accounts = sum(1 for e in svc.chain.entries() if e.get("kind") == "account")
+    out.append(f"her accounts: {accounts} in her record; {stored} stored by the memory provider, {waiting} waiting for it"
+               + (" (it stores them while Hermes is open, if it reads them: holonomic 0.25 or later)" if waiting else ""))
+    return out
+
+
+def register_cli(parser: Any, svc_factory) -> None:
+    sub = parser.add_subparsers(dest="persona_command")
+    sub.add_parser("status", help="What her record holds and whether its chain checks out")
+
+    def run(args: Any) -> None:
+        print(status(svc_factory()))
+    parser.set_defaults(func=run)
