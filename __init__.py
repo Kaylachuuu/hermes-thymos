@@ -9,7 +9,7 @@ process, that a persona service is running, so that holonomic stops writing in h
 """
 from __future__ import annotations
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 REQUEST_REFLECTION = {
     "name": "request_reflection",

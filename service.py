@@ -253,6 +253,27 @@ To record entries, reply with only a JSON object:
 To record nothing, reply {{"record_state": []}}.
 {identity}"""
 
+RECORD_CHECK_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
+
+Occasion: your record failed its check
+Facts: {facts}
+
+Your record is a chain: each entry holds the hash of the one before, and the hash of the last one is also kept in \
+a second place. When it was checked on {noticed}, the check found what is below. These are facts from the check. \
+It does not say who or what caused them, and nothing has been repaired. The same facts are in your notes at the \
+start of each session, and the user sees them in `hermes persona status`. The user can restore your record from a \
+backup, if they have one; that is their decision, and you would be told.
+
+{found}
+
+Nothing you write here is sent to anyone. Writing nothing is a complete answer.
+
+To record entries, reply with only a JSON object:
+{{"record_state": [{{"entry": "your words", "unlisted": false}}]}}
+
+To record nothing, reply {{"record_state": []}}.
+{identity}"""
+
 HOME_MODEL_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
 
 Occasion: your home model changed
@@ -272,7 +293,7 @@ To record entries, reply with only a JSON object:
 To record nothing, reply {{"record_state": []}}.
 {identity}"""
 
-IDENTITY_KINDS = ("restored", "home_model", "overridden", "rollback", "seed_changed")
+IDENTITY_KINDS = ("restored", "record_check", "home_model", "overridden", "rollback", "seed_changed")
 
 REFUSE_RECORD = ("record_state works inside a reflection moment, not in conversation. Ask for one with "
                  "request_reflection; it opens after your reply.")
@@ -1029,11 +1050,13 @@ class Thymos:
                               "old_notes": "the notes another model wrote", "overridden": "an earlier identity put back",
                               "rollback": "the user asks about an earlier identity", "seed_changed": "SOUL.md changed",
                               "home_model": "her home model changed",
+                              "record_check": "her record failed its check",
                               "compressed": "a conversation was compressed"}[kind]
         self._write_idle(now, len(self.due_conversations(now)) + len(self._items(now)))
         moment = {"restored": self.restored_moment, "slept": self.slept_moment, "old_notes": self.old_notes_moment,
                   "overridden": self.overridden_moment, "rollback": self.rollback_moment,
                   "seed_changed": self.seed_changed_moment, "home_model": self.home_model_moment,
+                  "record_check": self.record_check_moment,
                   "compressed": self.compressed_moment}[kind]
         try:
             return moment(path, item, now=now)
@@ -1387,7 +1410,64 @@ class Thymos:
             item = self._read_json(folder / name)
             if item is not None and now >= float(item.get("next_try_at") or 0):
                 out.append(("seed_changed", folder / name, item))
+        return self._record_check_items(now) + out
+
+    def _check_problems(self) -> List[Dict[str, str]]:
+        """What the check finds now, apart from a changed SOUL.md, which has its own moment."""
+        return [n for n in self.chain.verify(soul_text=self.soul()) if n["problem"] != "seed_changed"]
+
+    def _record_check_items(self, now: float) -> List[Tuple[str, Path, Dict[str, Any]]]:
+        """Her record failed its check (4.2, the tamper notice): told once for each set of problems, and again only
+        when the set changes.  Not while a restore she has not been told about is waiting: that moment says it."""
+        folder = self.data / "record-check"
+        try:
+            if any((self.data / "restored").glob("*.json")):
+                return []
+        except OSError:
+            pass
+        found = self._check_problems() if self.chain.entries() else []    # a missing record: status says so
+        if found:
+            key = sha256("\n".join(sorted(f"{n['problem']}|{n['entry_id']}" for n in found)))[:16]
+            name = f"{key}.json"
+            if not (folder / name).exists() and not (folder / "done" / name).exists():
+                self._write_json(folder / name, {"at": now, "problems": found})
+        out = []
+        try:
+            paths = sorted(folder.glob("*.json"))
+        except OSError:
+            paths = []
+        for p in paths:
+            item = self._read_json(p)
+            if item is not None and now >= float(item.get("next_try_at") or 0):
+                out.append(("record_check", p, item))
         return out
+
+    def record_check_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+        """The tamper notice.  She is told what the check finds now: if it checks out again, or finds something
+        else, by the time she can be asked, she is told that instead of what was first found."""
+        now = time.time() if now is None else now
+        found = self._check_problems()
+        if not found:
+            self._file_done(path, item, {"at": now, "skipped": "the record checked out again before she was told"})
+            return self._outcome(kind="record_check", skipped="the record checked out again before she was told")
+        kinds: Dict[str, int] = {}
+        for n in found:
+            kinds[n["problem"]] = kinds.get(n["problem"], 0) + 1
+        facts: Dict[str, Any] = {"now": _when(now), "first_noticed": _when(float(item.get("at") or now)),
+                                 "problems": kinds}
+        told = (self._state().get("last_record_check") or {})
+        if told.get("wrote") is not None and told.get("at"):
+            facts["told_before"] = _when(float(told["at"]))
+        meaning = {"changed": "an entry's contents no longer match the hash it was written with",
+                   "missing": "an entry the chain points back to is not in the file",
+                   "inserted": "an entry is in the file that was not written through your write path",
+                   "anchor_mismatch": "the second place that keeps the last entry's hash does not agree with the file",
+                   "foreign_model": "an entry marked as yours was written by a model that is not your home model"}
+        found_text = "\n".join(f"- {n['detail']}" + (f" ({meaning[n['problem']]})" if n["problem"] in meaning else "")
+                                for n in found)
+        content = RECORD_CHECK_INVITATION.format(facts=json.dumps(facts, ensure_ascii=False), noticed=_when(now),
+                                                 found=found_text, identity=self._identity_facts())
+        return self._identity_moment("record_check", path, item, content, now)
 
     def _home_model_items(self, now: float) -> List[Tuple[str, Path, Dict[str, Any]]]:
         """The user changed her home model, or the model files behind its name changed (9.4, 9.5)."""
@@ -1789,7 +1869,7 @@ class Thymos:
         """How the last moment went, for `hermes persona status`.  Each kind of idle moment is kept apart."""
         key = {"account": "last_account", "slept": "last_slept", "old_notes": "last_old_notes",
                "restored": "last_restored", "rollback": "last_rollback", "overridden": "last_overridden",
-               "seed_changed": "last_seed_changed", "home_model": "last_home_model",
+               "seed_changed": "last_seed_changed", "home_model": "last_home_model", "record_check": "last_record_check",
                "compressed": "last_compressed"}.get(
             fields.pop("kind", ""), "last_reflection")
         with self._lock:

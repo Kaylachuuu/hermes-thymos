@@ -3,7 +3,7 @@
 Personality for [Hermes Agent](https://hermes-agent.nousresearch.com): a record of herself that only she
 writes.
 
-Status: **0.9.0, the eighth slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
+Status: **0.10.0, the ninth slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
 section 10) gave her a record and reflection moments she asks for. The second (0.3.0, section 11) added idle
 time: she writes her own accounts of conversations that have gone quiet or ended, and holonomic stores them
 instead of writing its own. 0.4.0 finished that handover. After memory sleeps and dreams, she may write what
@@ -17,7 +17,8 @@ saying no is a complete answer, and a goal or task that keeps going on its own s
 15, 0.7.0). This one lets the user move her to another model, written into her record as their change and told
 to her on the new model, and keeps her home model's fingerprint where Ollama reports one (section 16). This one
 gives her a moment before compression: when Hermes summarises the older part of a long conversation, she may
-write about it from a copy of it as it was (0.9.0).
+write about it from a copy of it as it was (0.9.0). And when her record fails its check, she is told at the next
+quiet moment, not only in her notes (0.10.0).
 
 0.2.0 replaces 0.1.0's question after every reply. Nothing asks her how she feels any more, and there is
 no intensity number: a moment opens only when she asks for one. 0.1.0's answers stay where they were, in
@@ -68,6 +69,13 @@ Not related to the OpenClaw skill of the same name.
   as they were. She may store an account of that part of the conversation, record entries, both, or nothing.
   Her account is handed to the memory provider like any other, dated when the conversation was compressed.
   The conversation's own saved copy is then not offered to her again unless it goes on.
+- **When her record fails its check.** At each look for idle time the chain is checked. When it finds a
+  problem (an entry changed, missing or inserted, the anchor not agreeing, an entry by a model that is not her
+  home model), she is told at the next idle point, first, with what the check finds then and what each kind
+  of problem means. It is told once for each set of problems, and again only when the set changes; if the
+  record checks out again before she can be told, nothing is. Nothing is repaired. A changed `SOUL.md` has its
+  own moment, and a restore she has not been told about says it instead. She may record entries or revise her
+  identity, or nothing.
 - **Idle time in order.** A saved request comes first, then what was compressed, then the accounts, oldest conversation first, one at a
   time, then what memory made while it slept, then the old notes. Nothing new starts while someone is talking. What is waiting is written to
   `plugin-data/thymos/idle.json`, and holonomic's own reflection and sleep wait for it. Idle moments never
@@ -199,6 +207,7 @@ No Python packages are needed beyond what Hermes has.
 | `plugin-data/thymos/restored/` | A restore she has not been told about yet; moved to `done/` after |
 | `self.replaced-<time>/` | Her record and anchor as they were before a restore. Never deleted by thymos |
 | `plugin-data/thymos/rollback/`, `overridden/`, `seed-changed/`, `home-model/` | Moments about her identity and her home model waiting for idle time; each moves to `done/` |
+| `plugin-data/thymos/record-check/` | A failed check of her record she has not been told about; moved to `done/` after, which is how a set of problems is told once |
 | `plugin-data/thymos/slot-one.json` | Whether her identity was placed in slot one, at the start of the last session |
 | `plugin-data/thymos/idle.json` | What is waiting for idle time, rewritten every `poll_seconds`, for holonomic to wait on |
 
@@ -270,7 +279,7 @@ The design puts this in Hermes core. As a plugin it has these limits:
 ## Not in this slice
 
 Multi-user scope, the `/personality` overlay as a labelled message, and the other
-occasions (delegation, a tamper notice). All of these are designed in
+occasions (delegation). All of these are designed in
 `persona-provider.md`, and the record format already has their fields.
 
 ## Testing

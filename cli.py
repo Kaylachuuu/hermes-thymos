@@ -277,7 +277,11 @@ def _idle_lines(svc: Thymos, state: dict) -> list:
     waiting = len(list((svc.data / "home-model").glob("*.json"))) if (svc.data / "home-model").exists() else 0
     if waiting:
         out.append(f"her home model changed: {_n(waiting, 'change', 'changes')} waiting to be told to her")
-    for key, label in (("last_home_model", "after her home model changed"),
+    waiting = len(list((svc.data / "record-check").glob("*.json"))) if (svc.data / "record-check").exists() else 0
+    if waiting:
+        out.append("her record failed its check: waiting to tell her at the next quiet moment")
+    for key, label in (("last_record_check", "after her record failed its check"),
+                       ("last_home_model", "after her home model changed"),
                        ("last_rollback", "after you asked about an earlier identity"),
                        ("last_overridden", "after an override"), ("last_seed_changed", "after SOUL.md changed")):
         lm = state.get(key)
