@@ -64,7 +64,7 @@ def refusal(chain: Chain) -> str:
     if (not entries or problems(chain) or entries[0].get("kind") != "seed"
             or [e.get("kind") for e in entries] == ["seed"]):
         return ""
-    return ("her record is there and checks out, so it was not restored. Restore is for a record that is lost or "
+    return ("her record is there and checks out. Restore is for a record that is lost or "
             "damaged; going back to an earlier point while it is intact would discard what she has written since.")
 
 
