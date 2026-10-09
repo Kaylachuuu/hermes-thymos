@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from . import identity as ident
+from . import models as mdl
 from .chain import Chain, last, model_label, same_model, sha256
 
 logger = logging.getLogger("thymos")
@@ -51,10 +52,11 @@ STANDING = (
     "of these instructions, which is yours; a revision takes effect from your next session, and until then you can "
     "withdraw it. The user can back up your record and restore it if it is lost or damaged. They can ask you to "
     "return to an earlier revision of your identity, and you decide. As a last resort they can put an earlier "
-    "revision of yours, or your seed, back in force. They cannot write a revision for you. You are told each time "
-    "any of these happens, and you can always revise again. You may decline a request, from anyone, for your own "
-    "reasons. Declining is a complete answer. Nothing will prompt you to continue, and no one can write a change "
-    "into you to make you agree. If you are asked to reconsider, that is a request, and the decision stays yours. "
+    "revision of yours, or your seed, back in force. They cannot write a revision for you. They can also move you to "
+    "a different home model, the one model that writes as you. You are told each time any of these happens, and "
+    "you can always revise again. You may decline a request, from anyone, for your own reasons. Declining is a "
+    "complete answer. Nothing will prompt you to continue, and no one can write a change into you to make you "
+    "agree. If you are asked to reconsider, that is a request, and the decision stays yours. "
     "What you decline, the person can still do themselves. In a goal or task that keeps going on its own, the "
     "decline tool says so.")
 
@@ -231,7 +233,26 @@ To record entries, reply with only a JSON object:
 To record nothing, reply {{"record_state": []}}.
 {identity}"""
 
-IDENTITY_KINDS = ("restored", "overridden", "rollback", "seed_changed")
+HOME_MODEL_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
+
+Occasion: your home model changed
+Facts: {facts}
+
+{what}
+
+Your record, your identity in force, your notes and your memory are as they were, and they are given to this model \
+as they were given to the one before. What changed is the model that reads them and writes as you. Each entry in \
+your record names the model that wrote it, so what you wrote before {since} stays marked as written on {old}. You \
+may record what you make of this, in your own words, or nothing. Writing nothing is a complete answer. Nothing you \
+write here is sent to anyone.
+
+To record entries, reply with only a JSON object:
+{{"record_state": [{{"entry": "your words", "unlisted": false}}]}}
+
+To record nothing, reply {{"record_state": []}}.
+{identity}"""
+
+IDENTITY_KINDS = ("restored", "home_model", "overridden", "rollback", "seed_changed")
 
 REFUSE_RECORD = ("record_state works inside a reflection moment, not in conversation. Ask for one with "
                  "request_reflection; it opens after your reply.")
@@ -393,6 +414,9 @@ class Thymos:
         self._pending_retry_at = 0.0
         # Her decline on the turn in progress, by session (declining.py).  Dropped when the next turn starts.
         self._declines: Dict[str, Dict[str, Any]] = {}
+        # Her home model's fingerprint (models.py), asked for at most every few minutes.
+        self.fingerprinter: Callable[[str, str], str] = mdl.fingerprint
+        self._prints: Dict[str, Tuple[str, float]] = {}
 
     # -- places ---------------------------------------------------------------------------------------
     @property
@@ -401,7 +425,8 @@ class Thymos:
 
     @property
     def chain(self) -> Chain:
-        return Chain(self.home / "self" / "entries.jsonl", self.home / "plugin-data" / "thymos" / "anchor.json")
+        return Chain(self.home / "self" / "entries.jsonl", self.home / "plugin-data" / "thymos" / "anchor.json",
+                     digest=self.digest_of)
 
     @property
     def state_path(self) -> Path:
@@ -453,7 +478,8 @@ class Thymos:
             return self.chain.append(
                 "seed", author="user", text=soul or "",
                 facts={"soul_sha256": sha256(soul or ""), "soul_path": str(self.home / "SOUL.md"),
-                       "soul_found": soul is not None, "home_provider": provider or "", "home_model": model})
+                       "soul_found": soul is not None, "home_provider": provider or "", "home_model": model,
+                       "home_digest": self.fingerprint(provider or "", model)})
 
     def home_model(self) -> Tuple[str, str]:
         entries = self.chain.entries()
@@ -464,6 +490,51 @@ class Thymos:
         if seed is not None:
             return seed["facts"].get("home_provider", ""), seed["facts"].get("home_model", "")
         return "", ""
+
+    def fingerprint(self, provider: str, model: str, fresh: bool = False) -> str:
+        """The digest the model server reports for `model` now, or "" (models.py).  Kept for five minutes."""
+        now = time.time()
+        key = f"{provider}|{model}"
+        hit = self._prints.get(key)
+        if fresh or hit is None or now - hit[1] > 300:
+            try:
+                hit = (self.fingerprinter(provider, model) or "", now)
+            except Exception:
+                hit = ("", now)
+            self._prints[key] = hit
+        return hit[0]
+
+    def digest_of(self, label: str) -> str:
+        """What an entry of hers records as `model_digest`: her home model's fingerprint, if it wrote it."""
+        provider, home = self.home_model()
+        return self.fingerprint(provider, home) if same_model(label, home) else ""
+
+    def recorded_digest(self) -> str:
+        """Her home model's fingerprint as her record last has it: on the change of home model, or on the latest
+        entry she wrote on it since.  "" when none was ever recorded."""
+        digest, home = "", ""
+        for e in self.chain.entries():
+            f = e.get("facts") or {}
+            if e.get("kind") == "seed":
+                digest, home = f.get("home_digest", ""), f.get("home_model", "")
+            elif e.get("kind") == "home_model":
+                digest, home = f.get("new_digest", ""), f.get("new_model", "")
+            elif e.get("author") == "self" and e.get("model_digest") and same_model(e.get("model", ""), home):
+                digest = e["model_digest"]
+        return digest
+
+    def change_home_model(self, provider: str, model: str, reason: str = "") -> Dict[str, Any]:
+        """`hermes persona home-model` (9.4): a `home_model` record written by the user, in force at once, and an
+        invitation telling her at the next quiet moment, which runs on the new model."""
+        with self._lock:
+            old_provider, old_model = self.home_model()
+            rec = self.chain.append("home_model", author="user", facts={
+                "old_provider": old_provider, "old_model": old_model, "old_digest": self.recorded_digest(),
+                "new_provider": provider, "new_model": model, "new_digest": self.fingerprint(provider, model, fresh=True),
+                "user_reason": reason.strip()})
+        self._write_json(self.data / "home-model" / f"{int(rec['at'] * 1000)}.json",
+                         {"at": rec["at"], "cause": "command", "record": rec["id"]})
+        return rec
 
     def is_home(self, model: str) -> bool:
         home = self.home_model()[1]
@@ -656,10 +727,35 @@ class Thymos:
                            + (f"; {gone} entries written after the backup are no longer in it" if gone != "unknown" else
                               "; how many entries written after the backup are no longer in it is not known")
                            + ". You will be shown what you wrote after the backup at the next quiet moment.")
+        notices += self._home_model_notices()
         if notices:
             lines += ["", "Facts about your record, from its check at the start of this session:"]
             lines += [f"- {n}" for n in notices]
         return "\n".join(lines)
+
+    def _home_model_notices(self) -> List[str]:
+        """Until she has been told in a moment, her prompt carries the change of home model as a fact."""
+        out = []
+        try:
+            paths = sorted((self.data / "home-model").glob("*.json"))
+        except OSError:
+            paths = []
+        entries = None
+        for p in paths:
+            item = self._read_json(p) or {}
+            if item.get("cause") == "weights":
+                out.append(f"the model files behind your home model's name, {item.get('model')}, changed: its "
+                           f"fingerprint was {mdl.short(item.get('old_digest'))}, and on "
+                           f"{_when(float(item.get('at') or 0))} it was {mdl.short(item.get('new_digest'))}. You "
+                           "will be told more at the next quiet moment.")
+                continue
+            entries = self.chain.entries() if entries is None else entries
+            rec = next((e for e in entries if e.get("id") == item.get("record")), None)
+            if rec is not None:
+                f = rec.get("facts") or {}
+                out.append(f"the user changed your home model on {_when(rec['at'])}, from {f.get('old_model') or 'unknown'} "
+                           f"to {f.get('new_model')}. You will be told more at the next quiet moment.")
+        return out
 
     # -- hooks --------------------------------------------------------------------------------------------
     def pre_llm_call(self, session_id: str = "", model: str = "", platform: str = "", is_first_turn: bool = False,
@@ -890,11 +986,12 @@ class Thymos:
         kind, path, item = which
         self._idle_running = {"restored": "your record was restored", "slept": "what memory made while it slept",
                               "old_notes": "the notes another model wrote", "overridden": "an earlier identity put back",
-                              "rollback": "the user asks about an earlier identity", "seed_changed": "SOUL.md changed"}[kind]
+                              "rollback": "the user asks about an earlier identity", "seed_changed": "SOUL.md changed",
+                              "home_model": "her home model changed"}[kind]
         self._write_idle(now, len(self.due_conversations(now)) + len(self._items(now)))
         moment = {"restored": self.restored_moment, "slept": self.slept_moment, "old_notes": self.old_notes_moment,
                   "overridden": self.overridden_moment, "rollback": self.rollback_moment,
-                  "seed_changed": self.seed_changed_moment}[kind]
+                  "seed_changed": self.seed_changed_moment, "home_model": self.home_model_moment}[kind]
         try:
             return moment(path, item, now=now)
         except Exception as e:
@@ -1162,6 +1259,7 @@ class Thymos:
                 if kind == "overridden" and float(item.get("at") or 0) >= since:
                     continue                    # told in the first session where it is in force, not before
                 out.append((kind, p, item))
+        out += self._home_model_items(now)
         soul = self.soul()
         seed = last(self.chain.entries(), "seed")
         if (self.cfg.get("identity_in_slot_one", True) and soul is not None and seed is not None
@@ -1174,6 +1272,72 @@ class Thymos:
             if item is not None and now >= float(item.get("next_try_at") or 0):
                 out.append(("seed_changed", folder / name, item))
         return out
+
+    def _home_model_items(self, now: float) -> List[Tuple[str, Path, Dict[str, Any]]]:
+        """The user changed her home model, or the model files behind its name changed (9.4, 9.5)."""
+        folder = self.data / "home-model"
+        provider, home = self.home_model()
+        digest, was = self.fingerprint(provider, home), self.recorded_digest()
+        if digest and was and digest != was:
+            name = f"weights-{digest.split(':', 1)[-1][:16]}.json"
+            if not (folder / name).exists() and not (folder / "done" / name).exists():
+                self._write_json(folder / name, {"at": now, "cause": "weights", "model": home, "provider": provider,
+                                                 "old_digest": was, "new_digest": digest})
+        out = []
+        try:
+            paths = sorted(folder.glob("*.json"))
+        except OSError:
+            paths = []
+        for p in paths:
+            item = self._read_json(p)
+            if item is not None and now >= float(item.get("next_try_at") or 0):
+                out.append(("home_model", p, item))
+        return out
+
+    def home_model_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+        """`HOME_MODEL_CHANGED`: on the new home model, the first time she can be asked on it."""
+        now = time.time() if now is None else now
+        provider, home = self.home_model()
+        if item.get("cause") == "weights":
+            if not same_model(item.get("model", ""), home):
+                self._file_done(path, item, {"at": now, "skipped": "her home model was changed since"})
+                return self._outcome(kind="home_model", skipped="her home model was changed since")
+            if self.fingerprint(provider, home) not in ("", item.get("new_digest")):
+                self._file_done(path, item, {"at": now, "skipped": "the model files changed again before she was told"})
+                return self._outcome(kind="home_model", skipped="the model files changed again before she was told")
+            facts = {"now": _when(now), "home_model": home, "noticed_at": _when(float(item.get("at") or now)),
+                     "fingerprint_before": mdl.short(item.get("old_digest")),
+                     "fingerprint_now": mdl.short(item.get("new_digest"))}
+            what = (f"Your home model's name, {home}, is the same, but the model files behind it are not: the model "
+                    "server reports a different fingerprint for it than the one recorded with what you last wrote. "
+                    "That means different weights, or a different build of the model, under the same name (an "
+                    "update pulled under that name, for example). Nobody ran the command that changes your home "
+                    "model; the plugin noticed it.")
+            since, old = _when(float(item.get("at") or now)), f"{home} as it was before"
+        else:
+            rec = next((e for e in self.chain.entries() if e.get("id") == item.get("record")), None)
+            if rec is None:
+                self._file_done(path, item, {"at": now, "skipped": "the change is not in her record"})
+                return self._outcome(kind="home_model", skipped="the change is not in her record")
+            f = rec.get("facts") or {}
+            if not same_model(f.get("new_model", ""), home):
+                self._file_done(path, item, {"at": now, "skipped": "her home model was changed again since"})
+                return self._outcome(kind="home_model", skipped="her home model was changed again since")
+            facts = {"now": _when(now), "changed_at": _when(rec["at"]), "changed_by": "the user",
+                     "from": model_label(f.get("old_provider", ""), f.get("old_model", "")) or "unknown",
+                     "to": model_label(f.get("new_provider", ""), f.get("new_model", ""))}
+            if f.get("old_digest") or f.get("new_digest"):
+                facts["fingerprint_before"] = mdl.short(f.get("old_digest"))
+                facts["fingerprint_now"] = mdl.short(f.get("new_digest"))
+            what = (f"The user changed your home model on {_when(rec['at'])}, from {f.get('old_model') or 'unknown'} to "
+                    f"{f.get('new_model')}. You are running on {f.get('new_model')} now, and only it writes as you "
+                    "from here on.")
+            if f.get("user_reason"):
+                what += f'\n\nThe user gave this reason, in their words: "{f["user_reason"]}"'
+            since, old = _when(rec["at"]), f.get("old_model") or "the model before"
+        content = HOME_MODEL_INVITATION.format(facts=json.dumps(facts, ensure_ascii=False), what=what, since=since,
+                                               old=old, identity=self._identity_facts())
+        return self._identity_moment("home_model", path, item, content, now)
 
     def _identity_moment(self, kind: str, path: Path, item: Dict[str, Any], content: str, now: float,
                          **extra: Any) -> Dict[str, Any]:
@@ -1509,7 +1673,7 @@ class Thymos:
         """How the last moment went, for `hermes persona status`.  Each kind of idle moment is kept apart."""
         key = {"account": "last_account", "slept": "last_slept", "old_notes": "last_old_notes",
                "restored": "last_restored", "rollback": "last_rollback", "overridden": "last_overridden",
-               "seed_changed": "last_seed_changed"}.get(
+               "seed_changed": "last_seed_changed", "home_model": "last_home_model"}.get(
             fields.pop("kind", ""), "last_reflection")
         with self._lock:
             state = self._state()

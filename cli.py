@@ -7,19 +7,13 @@ from typing import Any, Callable, Optional, Tuple
 
 from . import backup
 from . import identity as ident
+from . import models as mdl
 from .chain import same_model, sha256
 from .service import Thymos, _when
 
 
 def configured_model() -> Tuple[str, str]:
-    try:
-        from hermes_cli.config import load_config_readonly
-        model = (load_config_readonly() or {}).get("model") or {}
-    except Exception:
-        return "", ""
-    if isinstance(model, str):
-        return "", model
-    return str(model.get("provider") or ""), str(model.get("default") or model.get("model") or "")
+    return mdl.configured()[:2]
 
 
 def status(svc: Thymos) -> str:
@@ -42,12 +36,13 @@ def status(svc: Thymos) -> str:
                      "so the change is in her prompt")
         out.append(line)
     provider, home = svc.home_model()
-    out.append(f"home model: {home}" + (f" ({provider})" if provider else ""))
+    out.append(f"home model: {home}" + (f" ({provider})" if provider else "") + _fingerprint_line(svc, provider, home))
     out += _identity_lines(svc, entries)
     cfg_provider, cfg_model = configured_model()
     if cfg_model and home and not same_model(cfg_model, home):
         out.append(f"configured main model: {cfg_model}. That is not her home model, so request_reflection is refused "
-                   "and no reflection moment opens on it. Changing her home model is not in this version.")
+                   "and no reflection moment opens on it. To make it her home model: hermes persona home-model "
+                   + (f"{cfg_provider}:{cfg_model}" if cfg_provider else cfg_model))
     kinds = Counter(e.get("kind") for e in entries)
     notes = svc.notes()
     out.append(f"entries: {len(entries)} ({', '.join(f'{k} {n}' for k, n in sorted(kinds.items()))})"
@@ -169,6 +164,67 @@ def do_ask_rollback(svc: Thymos, ref: str, message: str = "") -> str:
             "is running" + (", with your message" if message.strip() else "") + ". She decides.")
 
 
+def _fingerprint_line(svc: Thymos, provider: str, home: str) -> str:
+    was, now = svc.recorded_digest(), svc.fingerprint(provider, home)
+    if not was and not now:
+        return ""
+    line = f", fingerprint {mdl.short(was)} in her record"
+    if now and was and now != was:
+        return line + f"; the model server now reports {mdl.short(now)}: different files under the same name"
+    return line + (f", {mdl.short(now)} now" if now else "")
+
+
+HOME_MODEL_WARNING = """Moving her to another model is the largest change that can happen to her. Her record, her identity
+and her memory stay as they are; the model that reads them and writes as her changes. Only her home model can write
+in her record, and her reflection moments run only on it. This is written into her record as your change, and she
+is told at the next quiet moment, on the new model."""
+
+KNOWN_PROVIDERS = {"ollama", "ollama_chat", "custom", "local", "lmstudio", "openrouter", "anthropic", "openai",
+                   "gemini", "google", "nous", "xai", "deepseek", "groq", "together", "mistral", "huggingface"}
+
+
+def parse_model(spec: str) -> Tuple[str, str]:
+    """PROVIDER:MODEL, or MODEL on the configured provider.  Ollama names hold a ":" too (gemma3:27b), so a prefix is a provider only when
+    it is a known one or the configured provider, or the rest is the configured model."""
+    spec = spec.strip()
+    cfg_provider, cfg_model = configured_model()
+    if cfg_model and same_model(spec, cfg_model):
+        return cfg_provider, cfg_model
+    if ":" in spec:
+        prefix, rest = spec.split(":", 1)
+        if prefix.lower() in KNOWN_PROVIDERS or (cfg_provider and prefix.lower() == cfg_provider.lower()) \
+                or (cfg_model and same_model(rest, cfg_model)):
+            return prefix, rest
+    return cfg_provider, spec
+
+
+def do_home_model(svc: Thymos, spec: str, reason: str = "", yes: bool = False,
+                  ask: Callable[[str], str] = input) -> str:
+    if not svc.chain.entries():
+        return "not changed: she has no record yet (it starts with her first session)"
+    provider, model = parse_model(spec)
+    if not model:
+        return "not changed: name the model, as PROVIDER:MODEL (for example ollama:gemma3:27b)"
+    old_provider, old = svc.home_model()
+    if same_model(model, old):
+        return f"not changed: {old} is already her home model"
+    print(HOME_MODEL_WARNING)
+    print(f"\nfrom: {old or 'none recorded'}" + (f" ({old_provider})" if old_provider else "")
+          + f"\nto:   {model}" + (f" ({provider})" if provider else ""))
+    digest = svc.fingerprint(provider, model, fresh=True)
+    if digest:
+        print(f"fingerprint of {model}: {mdl.short(digest)}")
+    cfg_provider, cfg_model = configured_model()
+    if cfg_model and not same_model(cfg_model, model):
+        print(f"Hermes' main model is {cfg_model}. Set it to {model} as well, or her moments wait: they run only on "
+              "her home model.")
+    if not yes and ask("Change her home model? [y/N] ").strip().lower() not in ("y", "yes"):
+        return "not changed."
+    rec = svc.change_home_model(provider, model, reason)
+    return (f"her home model is now {model}; record {rec['id']} written. She is told at the next quiet moment while "
+            "Hermes is running on it" + (", with your reason" if reason.strip() else "") + ".")
+
+
 def _idle_lines(svc: Thymos, state: dict) -> list:
     """Idle time: conversations waiting to be offered to her, and what became of her accounts."""
     out = []
@@ -218,7 +274,11 @@ def _idle_lines(svc: Thymos, state: dict) -> list:
             if lr.get("problem"):
                 line += f"; {lr['problem']}"
         out.append(line)
-    for key, label in (("last_rollback", "after you asked about an earlier identity"),
+    waiting = len(list((svc.data / "home-model").glob("*.json"))) if (svc.data / "home-model").exists() else 0
+    if waiting:
+        out.append(f"her home model changed: {_n(waiting, 'change', 'changes')} waiting to be told to her")
+    for key, label in (("last_home_model", "after her home model changed"),
+                       ("last_rollback", "after you asked about an earlier identity"),
                        ("last_overridden", "after an override"), ("last_seed_changed", "after SOUL.md changed")):
         lm = state.get(key)
         if lm:
@@ -321,6 +381,10 @@ def register_cli(parser: Any, svc_factory) -> None:
     o.add_argument("--reason", default="", help="Why, in your words; she is shown it")
     o.add_argument("--withdraw", action="store_true", help="Undo an override that has not taken effect yet")
     o.add_argument("--yes", action="store_true", help="Do not ask before overriding")
+    h = sub.add_parser("home-model", help="Move her to another model: the one that writes as her")
+    h.add_argument("model", help="PROVIDER:MODEL, for example ollama:gemma3:27b")
+    h.add_argument("--reason", default="", help="Why, in your words; she is shown it")
+    h.add_argument("--yes", action="store_true", help="Do not ask before changing it")
 
     def run(args: Any) -> None:
         command = getattr(args, "persona_command", None)
@@ -334,6 +398,8 @@ def register_cli(parser: Any, svc_factory) -> None:
             print(do_ask_rollback(svc_factory(), args.ref, args.message))
         elif command == "override":
             print(do_override(svc_factory(), args.ref, args.reason, args.withdraw, args.yes))
+        elif command == "home-model":
+            print(do_home_model(svc_factory(), args.model, args.reason, args.yes))
         else:
             print(status(svc_factory()))
     parser.set_defaults(func=run)
