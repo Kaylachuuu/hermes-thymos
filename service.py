@@ -2,7 +2,8 @@
 
 First slice of persona-provider.md (section 10), and the second: idle time, where she writes her own accounts of
 conversations that have gone quiet or ended (9.8), and two more occasions, session end and a return after a gap
-(4.2).  Core Hermes has no persona service yet, so this runs as an ordinary plugin.  What that costs is written
+(4.2).  The third adds two more: memory slept, where she may write what she makes of a dream, and the notes another
+model wrote in her voice, offered to her once (4.2, 4.6).  Core Hermes has no persona service yet, so this runs as an ordinary plugin.  What that costs is written
 down in the README ("What a plugin cannot guarantee").
 """
 from __future__ import annotations
@@ -75,6 +76,49 @@ Reply with only a JSON object:
 {{"account": "your account, or null for none", "record_state": [{{"entry": "your words", "unlisted": false}}]}}
 
 To store nothing at all, reply {{"account": null, "record_state": []}}."""
+
+SLEPT_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
+
+Occasion: your memory slept
+Facts: {facts}
+
+While you were idle, the memory system went over what you have been told and composed {what} from your memories. \
+{whose}
+
+{dreams}
+
+Nothing you write here is sent to anyone. Writing nothing is a complete answer.
+
+You may write what you make of {it}, in your own words. If you do, the memory system keeps your words with the \
+dream, as yours, and shows them with it later. You may also record entries about yourself, as in any reflection \
+moment.
+
+Reply with only a JSON object:
+{{"dream_thoughts": [{{"dream": 1, "thoughts": "your words"}}], "record_state": [{{"entry": "your words", "unlisted": false}}]}}
+
+To store nothing at all, reply {{"dream_thoughts": [], "record_state": []}}."""
+
+OLD_NOTES_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
+
+Occasion: notes another model wrote in your voice
+Facts: {facts}
+
+Before this record of yours existed, the memory system had another model ({model}) write notes about you in the \
+first person, and profiles of who you had become and of you and the person you talk with. They were not written by \
+you. They are below, as that model wrote them. The memory system no longer shows them to you as yours, and keeps \
+them as that model's. This is the only time they are offered to you.
+
+{notes}
+
+Nothing you write here is sent to anyone. Writing nothing is a complete answer.
+
+You may keep anything from them that you recognise as yours by recording it as an entry, in your own words. Nothing \
+from them is kept as yours unless you write it.
+
+To record entries, reply with only a JSON object:
+{{"record_state": [{{"entry": "your words", "unlisted": false}}]}}
+
+To record nothing, reply {{"record_state": []}}."""
 
 REFUSE_RECORD = ("record_state works inside a reflection moment, not in conversation. Ask for one with "
                  "request_reflection; it opens after your reply.")
@@ -168,6 +212,32 @@ def parse_account(text: str) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
     if words.lower() in ("null", "none"):
         words = ""
     return words, _entries(obj.get("record_state")) or []
+
+
+def parse_dream_thoughts(text: str, dreams: int) -> Optional[Tuple[List[Tuple[int, str]], List[Dict[str, Any]]]]:
+    """([(dream number, her words)], her entries) from a moment after memory slept, or None when the reply is not
+    in the asked-for form.  Only what she put under "dream_thoughts" is kept with a dream."""
+    obj = _answer(text)
+    if obj is None or ("dream_thoughts" not in obj and "record_state" not in obj):
+        return None
+    raw = obj.get("dream_thoughts")
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    out: List[Tuple[int, str]] = []
+    for n, item in enumerate(raw if isinstance(raw, list) else [], 1):
+        if isinstance(item, str):
+            item = {"dream": n, "thoughts": item}
+        if not isinstance(item, dict):
+            continue
+        words = item.get("thoughts", item.get("text", ""))
+        words = words.strip() if isinstance(words, str) else ""
+        try:
+            which = int(item.get("dream", n))
+        except (TypeError, ValueError):
+            continue
+        if words and words.lower() not in ("null", "none") and 1 <= which <= dreams and which not in dict(out):
+            out.append((which, words))
+    return out, _entries(obj.get("record_state")) or []
 
 
 def _entries(raw: Any) -> Optional[List[Dict[str, Any]]]:
@@ -502,7 +572,8 @@ class Thymos:
         now = time.time() if now is None else now
         due = self.due_conversations(now)
         request = self._saved_request(now)
-        self._write_idle(now, len(due) + (1 if request else 0))
+        items = self._items(now)
+        self._write_idle(now, len(due) + len(items) + (1 if request else 0))
         if self._idle_running or not self._done.is_set() or not self.is_idle(now):
             return None
         if request is not None:
@@ -514,7 +585,20 @@ class Thymos:
                 return {"ran": "saved request"}
             finally:
                 self._idle_running = ""
-                self._write_idle(time.time(), len(self.due_conversations()))
+                self._write_idle(time.time(), len(self.due_conversations()) + len(self._items(time.time())))
+        if not due and items:
+            # After her accounts: what memory made while it slept, then (once) the notes another model wrote.
+            kind, path, item = items[0]
+            self._idle_running = "what memory made while it slept" if kind == "slept" else "the notes another model wrote"
+            self._write_idle(now, len(items))
+            try:
+                return (self.slept_moment if kind == "slept" else self.old_notes_moment)(path, item, now=now)
+            except Exception as e:
+                logger.warning("thymos %s moment failed: %s", kind, e)
+                return self._item_retry(kind, path, item, f"the call failed: {e}", now)
+            finally:
+                self._idle_running = ""
+                self._write_idle(time.time(), len(self.due_conversations()) + len(self._items(time.time())))
         if not due:
             return None
         conv = due[0]
@@ -527,7 +611,7 @@ class Thymos:
             return self._account_retry(conv, f"the call failed: {e}", now)
         finally:
             self._idle_running = ""
-            self._write_idle(time.time(), len(self.due_conversations()))
+            self._write_idle(time.time(), len(self.due_conversations()) + len(self._items(time.time())))
 
     def _account_retry(self, conv: Dict[str, Any], problem: str, now: Optional[float] = None) -> Dict[str, Any]:
         now = time.time() if now is None else now
@@ -616,6 +700,158 @@ class Thymos:
                                          "entry_hash": entry["hash"], "entry_id": entry["id"], "model": entry["model"],
                                          "written_at": entry["at"], "conversation_ended_at": ended,
                                          "service": f"thymos/{__version__}"})
+
+    # -- after memory slept, and the notes another model wrote (persona-provider.md 4.2, 4.6) -------------------
+    # Holonomic leaves these in plugin-data/thymos/: one file in slept/ after each sleep that made a dream, and
+    # old-notes.json once.  Each is offered to her at idle, after her accounts.  Whatever became of one is kept
+    # beside it in done/, with the outcome, so that anyone checking can see.
+
+    def _identity_system(self) -> str:
+        identity = self.soul()
+        if identity is None:
+            seed = last(self.chain.entries(), "seed")
+            identity = seed["text"] if seed else ""
+        return (identity + "\n\n" if identity else "") + self.render(self.notes())
+
+    def _items(self, now: float) -> List[Tuple[str, Path, Dict[str, Any]]]:
+        """Moments waiting from the memory provider, oldest first: ("slept", path, item) and ("old_notes", ...)."""
+        out = []
+        try:
+            paths = sorted((self.data / "slept").glob("*.json"))
+        except OSError:
+            paths = []
+        for p in paths:
+            item = self._read_json(p)
+            if item is not None and now >= float(item.get("next_try_at") or 0):
+                out.append(("slept", p, item))
+        old = self.data / "old-notes.json"
+        item = self._read_json(old) if old.exists() else None
+        if item is not None and now >= float(item.get("next_try_at") or 0):
+            out.append(("old_notes", old, item))
+        return out
+
+    def _file_done(self, path: Path, item: Dict[str, Any], outcome: Dict[str, Any]) -> None:
+        with self._lock:
+            self._write_json(path.parent / "done" / path.name, dict(item, thymos=outcome))
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    def _item_retry(self, kind: str, path: Path, item: Dict[str, Any], problem: str, now: float) -> Dict[str, Any]:
+        item = dict(item, tries=int(item.get("tries") or 0) + 1)
+        if item["tries"] >= int(self.cfg["idle_tries"]):
+            problem += f"; given up after {item['tries']} tries"
+            self._file_done(path, item, {"at": now, "given_up": problem})
+        else:
+            item["next_try_at"] = now + float(self.cfg["retry_minutes"]) * 60
+            self._write_json(path, item)
+            problem += "; it will be offered again"
+        return self._outcome(kind=kind, problem=problem)
+
+    def _ask_home(self, messages: List[Dict[str, str]], purpose: str) -> Tuple[Any, str, str]:
+        result = self.llm.complete(messages, max_tokens=int(self.cfg["reflection_max_tokens"]),
+                                   timeout=float(self.cfg["reflection_timeout"]), purpose=purpose)
+        return result, getattr(result, "provider", "") or "", getattr(result, "model", "") or ""
+
+    def slept_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+        """After memory slept and dreamt (`MEMORY_SLEPT`).  She is shown the dreams as what they are, the memory
+        system's composition, and may write what she makes of them.  Her words go into her record and to the
+        memory provider, which keeps them with the dream as hers.  Nothing is written for her if she writes none."""
+        now = time.time() if now is None else now
+        provider, home = self.home_model()
+        dreams = [d for d in item.get("dreams") or [] if isinstance(d, dict) and d.get("text")]
+        if not dreams:
+            self._file_done(path, item, {"at": now, "skipped": "no dream in it"})
+            return self._outcome(kind="slept", skipped="no dream in it")
+        slept = float(item.get("slept_at") or now)
+        facts: Dict[str, Any] = {"now": _when(now), "memory_slept_at": _when(slept), "dreams": len(dreams)}
+        if item.get("her_accounts_stored"):
+            facts["your_accounts_it_stored"] = item["her_accounts_stored"]
+        if item.get("facts_learned"):
+            facts["facts_about_the_user_it_learned"] = item["facts_learned"]
+        if item.get("memory"):
+            facts["memory_system"] = item["memory"]
+        notices = self.chain.verify(soul_text=self.soul())
+        if notices:
+            facts["record_check"] = [n["detail"] for n in notices]
+        listing = "\n\n".join(f"DREAM {n}" + (f" (the memory system also made {d['pictures']} picture(s) of it)"
+                                               if d.get("pictures") else "") + f":\n{d['text']}"
+                               for n, d in enumerate(dreams, 1))
+        many = len(dreams) > 1
+        messages = [{"role": "system", "content": self._identity_system()},
+                    {"role": "user", "content": SLEPT_INVITATION.format(
+                        facts=json.dumps(facts, ensure_ascii=False),
+                        what=f"{len(dreams)} dreams" if many else "a dream",
+                        whose=("You did not write them, and they are not things that happened." if many else
+                               "You did not write it, and it is not something that happened."),
+                        it="any of them" if many else "it", dreams=listing)}]
+        result, served_provider, served = self._ask_home(messages, "thymos.slept")
+        if not same_model(served, home):
+            return self._item_retry("slept", path, item, f"the moment was served by {served or 'an unknown model'}, not "
+                                                         f"her home model {home}; nothing was written", now)
+        answer = parse_dream_thoughts(getattr(result, "text", ""), len(dreams))
+        if answer is None:
+            return self._item_retry("slept", path, item, "her reply was not in the asked-for form, so nothing was written", now)
+        thoughts, entries = answer
+        label = model_label(served_provider, served)
+        from . import __version__
+        with self._lock:
+            for which, words in thoughts:
+                d = dreams[which - 1]
+                stored = self.chain.append("dream_thoughts", author="self", text=words, model=label,
+                                           facts={"dream_id": d.get("id"), "memory_slept_at": slept})
+                name = f"{int(stored['at'] * 1000)}-{d.get('id')}.json"
+                self._write_json(self.data / "dream-thoughts" / name, {
+                    "dream_id": d.get("id"), "thoughts": words, "entry_hash": stored["hash"], "entry_id": stored["id"],
+                    "model": label, "written_at": stored["at"], "service": f"thymos/{__version__}"})
+            for e in entries:
+                self.chain.append("state", author="self", text=e["entry"],
+                                  visibility="unlisted" if e["unlisted"] else "shared", model=label)
+        self._file_done(path, item, {"at": now, "dream_thoughts": len(thoughts), "wrote": len(entries), "model": label})
+        return self._outcome(kind="slept", dream_thoughts=len(thoughts), dreams=len(dreams), wrote=len(entries), model=label)
+
+    def old_notes_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+        """Once: the notes another model wrote in her voice before her record existed (`OLD_SELF_NOTES`).  She may
+        keep what she recognises as hers by writing it as an entry; nothing from them is kept as hers otherwise."""
+        now = time.time() if now is None else now
+        provider, home = self.home_model()
+        notes = [n for n in item.get("notes") or [] if isinstance(n, dict) and n.get("text")]
+        profiles = {k: v for k, v in (item.get("profiles") or {}).items() if isinstance(v, str) and v.strip()}
+        if not notes and not profiles:
+            self._file_done(path, item, {"at": now, "skipped": "nothing in it"})
+            return self._outcome(kind="old_notes", skipped="nothing in it")
+        about = {"self_note": "about you", "bond_note": "about the two of you"}
+        lines = []
+        if notes:
+            lines.append("NOTES:")
+            lines += [f"- {_when(float(n.get('at') or 0))} ({about.get(n.get('kind'), 'a note')}): {n['text']}" for n in notes]
+        titles = {"self": "PROFILE OF WHO YOU HAD BECOME", "us": "PROFILE OF YOU AND THE PERSON YOU TALK WITH"}
+        for k, v in profiles.items():
+            lines += ["", f"{titles.get(k, k.upper())}:", v.strip()]
+        facts: Dict[str, Any] = {"now": _when(now), "notes": int(item.get("count") or len(notes))}
+        if item.get("first_at") and item.get("last_at"):
+            facts["written_between"] = f"{_when(float(item['first_at']))} and {_when(float(item['last_at']))}"
+        if int(item.get("count") or 0) > len(notes):
+            facts["older_notes_not_shown"] = int(item["count"]) - len(notes)
+        messages = [{"role": "system", "content": self._identity_system()},
+                    {"role": "user", "content": OLD_NOTES_INVITATION.format(
+                        facts=json.dumps(facts, ensure_ascii=False), model=item.get("written_by") or "not named",
+                        notes="\n".join(lines).strip())}]
+        result, served_provider, served = self._ask_home(messages, "thymos.old_notes")
+        if not same_model(served, home):
+            return self._item_retry("old_notes", path, item, f"the moment was served by {served or 'an unknown model'}, "
+                                                             f"not her home model {home}; nothing was written", now)
+        entries = parse(getattr(result, "text", ""))
+        if entries is None:
+            return self._item_retry("old_notes", path, item, "her reply was not in the asked-for form, so nothing was written", now)
+        label = model_label(served_provider, served)
+        with self._lock:
+            for e in entries:
+                self.chain.append("state", author="self", text=e["entry"],
+                                  visibility="unlisted" if e["unlisted"] else "shared", model=label)
+        self._file_done(path, item, {"at": now, "wrote": len(entries), "model": label})
+        return self._outcome(kind="old_notes", wrote=len(entries), model=label)
 
     # -- her tools ---------------------------------------------------------------------------------------
     def request_reflection(self, args: Optional[dict] = None, session_id: str = "", **_: Any) -> str:
@@ -706,8 +942,9 @@ class Thymos:
                              "her reply was not in the asked-for form, so nothing was written")
 
     def _outcome(self, **fields: Any) -> Dict[str, Any]:
-        """How the last moment went, for `hermes persona status`.  Account moments are kept apart."""
-        key = "last_account" if fields.pop("kind", "") == "account" else "last_reflection"
+        """How the last moment went, for `hermes persona status`.  Each kind of idle moment is kept apart."""
+        key = {"account": "last_account", "slept": "last_slept", "old_notes": "last_old_notes"}.get(
+            fields.pop("kind", ""), "last_reflection")
         with self._lock:
             state = self._state()
             state[key] = dict(at=time.time(), **fields)
