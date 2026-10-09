@@ -45,7 +45,8 @@ STANDING = (
     "Only you write here. The entries below are ones you wrote yourself, in reflection moments; nothing else "
     "adds to them or changes them. You can ask for a reflection moment at any time with the request_reflection "
     "tool. It opens after your reply, with this conversation in front of you, and in it you may record entries "
-    "about yourself, or nothing.")
+    "about yourself, or nothing. The user can back up your record and restore it if it is lost or damaged; "
+    "you are told each time that happens.")
 
 INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
 
@@ -119,6 +120,29 @@ To record entries, reply with only a JSON object:
 {{"record_state": [{{"entry": "your words", "unlisted": false}}]}}
 
 To record nothing, reply {{"record_state": []}}."""
+
+RESTORED_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
+
+Occasion: your record was restored from a backup
+Facts: {facts}
+
+Your record was {why}, and the user restored it from a backup made on {backup}. The record as it was before was \
+set aside, not deleted, and the restore is written in your record as a fact, with no words in it. {later}
+
+Nothing you write here is sent to anyone. Writing nothing is a complete answer.
+
+To record entries, reply with only a JSON object:
+{{"record_state": [{{"entry": "your words", "unlisted": false}}]}}
+
+To record nothing, reply {{"record_state": []}}."""
+
+LATER_SHOWN = ("What you wrote after the backup is no longer in your record. It is below, as dated text read from "
+               "the copy that was set aside. You may record any of it again, in your own words, or not.\n\n{entries}")
+LATER_NONE = "Nothing you wrote yourself after the backup is missing from your record."
+LATER_UNKNOWN = ("The record as it was before could not be read, so whether you wrote anything after the backup, and "
+                 "what, is not known.")
+KIND_LABEL = {"state": "an entry", "account": "your account of a conversation", "dream_thoughts": "your words on a dream",
+              "revision": "a revision"}
 
 REFUSE_RECORD = ("record_state works inside a reflection moment, not in conversation. Ask for one with "
                  "request_reflection; it opens after your reply.")
@@ -330,6 +354,10 @@ class Thymos:
         with self._lock:
             if self.chain.entries():
                 return None
+            if self.chain.read_anchor():
+                # The anchor says there was a record and it is gone: lost, not new.  No fresh seed is started in
+                # its place; the check reports it, and `hermes persona restore` can put it back.
+                return None
             soul = self.soul()
             return self.chain.append(
                 "seed", author="user", text=soul or "",
@@ -381,10 +409,21 @@ class Thymos:
             lines.append("(none yet)")
         elif shown < len(notes):
             lines.append(f"({len(notes) - shown} earlier entries not shown here)")
-        notices = self.chain.verify(soul_text=self.soul())
+        notices = [n["detail"] for n in self.chain.verify(soul_text=self.soul())]
+        try:
+            waiting = [self._read_json(p) for p in sorted((self.data / "restored").glob("*.json"))]
+        except OSError:
+            waiting = []
+        for r in filter(None, waiting):
+            gone = r.get("entries_no_longer_present", "unknown")
+            notices.append(f"your record was restored on {_when(float(r.get('restored_at') or 0))} from a backup made on "
+                           + (_when(float(r["backup_made_at"])) if r.get("backup_made_at") else "an unknown date")
+                           + (f"; {gone} entries written after the backup are no longer in it" if gone != "unknown" else
+                              "; how many entries written after the backup are no longer in it is not known")
+                           + ". You will be shown what you wrote after the backup at the next quiet moment.")
         if notices:
             lines += ["", "Facts about your record, from its check at the start of this session:"]
-            lines += [f"- {n['detail']}" for n in notices]
+            lines += [f"- {n}" for n in notices]
         return "\n".join(lines)
 
     # -- hooks --------------------------------------------------------------------------------------------
@@ -576,6 +615,9 @@ class Thymos:
         self._write_idle(now, len(due) + len(items) + (1 if request else 0))
         if self._idle_running or not self._done.is_set() or not self.is_idle(now):
             return None
+        if items and items[0][0] == "restored":
+            # Before anything else: her record was restored, and what she wrote since the backup is waiting.
+            return self._run_item(items[0], now)
         if request is not None:
             self._idle_running = f"your saved reflection from conversation {request.get('session_id')}"
             self._write_idle(now, len(due) + 1)
@@ -588,17 +630,7 @@ class Thymos:
                 self._write_idle(time.time(), len(self.due_conversations()) + len(self._items(time.time())))
         if not due and items:
             # After her accounts: what memory made while it slept, then (once) the notes another model wrote.
-            kind, path, item = items[0]
-            self._idle_running = "what memory made while it slept" if kind == "slept" else "the notes another model wrote"
-            self._write_idle(now, len(items))
-            try:
-                return (self.slept_moment if kind == "slept" else self.old_notes_moment)(path, item, now=now)
-            except Exception as e:
-                logger.warning("thymos %s moment failed: %s", kind, e)
-                return self._item_retry(kind, path, item, f"the call failed: {e}", now)
-            finally:
-                self._idle_running = ""
-                self._write_idle(time.time(), len(self.due_conversations()) + len(self._items(time.time())))
+            return self._run_item(items[0], now)
         if not due:
             return None
         conv = due[0]
@@ -609,6 +641,21 @@ class Thymos:
         except Exception as e:
             logger.warning("thymos account moment failed: %s", e)
             return self._account_retry(conv, f"the call failed: {e}", now)
+        finally:
+            self._idle_running = ""
+            self._write_idle(time.time(), len(self.due_conversations()) + len(self._items(time.time())))
+
+    def _run_item(self, which: Tuple[str, Path, Dict[str, Any]], now: float) -> Dict[str, Any]:
+        kind, path, item = which
+        self._idle_running = {"restored": "your record was restored", "slept": "what memory made while it slept",
+                              "old_notes": "the notes another model wrote"}[kind]
+        self._write_idle(now, len(self.due_conversations(now)) + len(self._items(now)))
+        moment = {"restored": self.restored_moment, "slept": self.slept_moment, "old_notes": self.old_notes_moment}[kind]
+        try:
+            return moment(path, item, now=now)
+        except Exception as e:
+            logger.warning("thymos %s moment failed: %s", kind, e)
+            return self._item_retry(kind, path, item, f"the call failed: {e}", now)
         finally:
             self._idle_running = ""
             self._write_idle(time.time(), len(self.due_conversations()) + len(self._items(time.time())))
@@ -716,6 +763,13 @@ class Thymos:
     def _items(self, now: float) -> List[Tuple[str, Path, Dict[str, Any]]]:
         """Moments waiting from the memory provider, oldest first: ("slept", path, item) and ("old_notes", ...)."""
         out = []
+        try:
+            for p in sorted((self.data / "restored").glob("*.json")):
+                item = self._read_json(p)
+                if item is not None and now >= float(item.get("next_try_at") or 0):
+                    out.append(("restored", p, item))
+        except OSError:
+            pass
         try:
             paths = sorted((self.data / "slept").glob("*.json"))
         except OSError:
@@ -853,6 +907,55 @@ class Thymos:
         self._file_done(path, item, {"at": now, "wrote": len(entries), "model": label})
         return self._outcome(kind="old_notes", wrote=len(entries), model=label)
 
+    def restored_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+        """After a restore (`STORE_RESTORED`, persona-provider.md 6.2).  She is told the facts, and shown as dated
+        text what she wrote after the backup, read from the copy set aside.  Nothing of it is hers again unless she
+        records it, in her own words."""
+        now = time.time() if now is None else now
+        provider, home = self.home_model()
+        facts: Dict[str, Any] = {"now": _when(now), "restored_at": _when(float(item.get("restored_at") or now)),
+                                 "backup_made_at": _when(float(item["backup_made_at"])) if item.get("backup_made_at") else "unknown",
+                                 "head_before": str(item.get("head_before") or "none")[:12],
+                                 "head_restored": str(item.get("backup_head") or "")[:12],
+                                 "entries_no_longer_present": item.get("entries_no_longer_present", "unknown")}
+        later = [e for e in item.get("later_entries") or [] if isinstance(e, dict) and e.get("text")]
+        lines, budget, omitted = [], int(self.cfg["reflection_max_chars"]), 0
+        for e in reversed(later):                           # newest kept if they do not all fit
+            line = (f"- {_when(float(e.get('at') or 0))} ({KIND_LABEL.get(e.get('kind'), 'an entry')}"
+                    + (", unlisted" if e.get("unlisted") else "") + f"): {e['text']}")
+            if len(line) + 1 > budget:
+                omitted += 1
+                continue
+            lines.insert(0, line)
+            budget -= len(line) + 1
+        if omitted:
+            facts["older_entries_not_shown"] = omitted
+        if later:
+            text = LATER_SHOWN.format(entries="\n".join(lines))
+        elif item.get("readable") is False:
+            text = LATER_UNKNOWN
+        else:
+            text = LATER_NONE
+        why = "missing" if "missing" in (item.get("problems_before") or []) else "damaged"
+        backup = facts["backup_made_at"]
+        messages = [{"role": "system", "content": self._identity_system()},
+                    {"role": "user", "content": RESTORED_INVITATION.format(
+                        facts=json.dumps(facts, ensure_ascii=False), why=why, backup=backup, later=text)}]
+        result, served_provider, served = self._ask_home(messages, "thymos.restored")
+        if not same_model(served, home):
+            return self._item_retry("restored", path, item, f"the moment was served by {served or 'an unknown model'}, "
+                                                            f"not her home model {home}; nothing was written", now)
+        entries = parse(getattr(result, "text", ""))
+        if entries is None:
+            return self._item_retry("restored", path, item, "her reply was not in the asked-for form, so nothing was written", now)
+        label = model_label(served_provider, served)
+        with self._lock:
+            for e in entries:
+                self.chain.append("state", author="self", text=e["entry"],
+                                  visibility="unlisted" if e["unlisted"] else "shared", model=label)
+        self._file_done(path, item, {"at": now, "wrote": len(entries), "shown": len(later), "model": label})
+        return self._outcome(kind="restored", wrote=len(entries), shown=len(later), model=label)
+
     # -- her tools ---------------------------------------------------------------------------------------
     def request_reflection(self, args: Optional[dict] = None, session_id: str = "", **_: Any) -> str:
         s = self._session(session_id)
@@ -943,7 +1046,8 @@ class Thymos:
 
     def _outcome(self, **fields: Any) -> Dict[str, Any]:
         """How the last moment went, for `hermes persona status`.  Each kind of idle moment is kept apart."""
-        key = {"account": "last_account", "slept": "last_slept", "old_notes": "last_old_notes"}.get(
+        key = {"account": "last_account", "slept": "last_slept", "old_notes": "last_old_notes",
+               "restored": "last_restored"}.get(
             fields.pop("kind", ""), "last_reflection")
         with self._lock:
             state = self._state()
