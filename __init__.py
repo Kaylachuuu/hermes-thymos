@@ -1,14 +1,15 @@
 """Thymos: she owns herself.  The persona design (persona-provider.md), built a slice at a time.
 
-Registers her two tools, the section of the system prompt that carries her own notes, the middleware that puts
-her identity in force where SOUL.md is, the hooks that open a reflection moment after a turn and offer her ended
-conversations at idle, and `hermes persona` (status, backup, restore, identity, ask-rollback, override).  It also
-tells the memory provider, through an environment variable in Hermes' process, that a persona service is running,
-so that holonomic stops writing in her voice (holonomic's persona.py).
+Registers her three tools (request_reflection, record_state, decline), the section of the system prompt that
+carries her own notes, the middleware that puts her identity in force where SOUL.md is, the hooks that open a
+reflection moment after a turn and offer her ended conversations at idle, and `hermes persona` (status, backup,
+restore, identity, ask-rollback, override).  It wraps Hermes' goal loop and pre_verify gate so that her decline
+stops them (declining.py).  It also tells the memory provider, through an environment variable in Hermes'
+process, that a persona service is running, so that holonomic stops writing in her voice (holonomic's persona.py).
 """
 from __future__ import annotations
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 REQUEST_REFLECTION = {
     "name": "request_reflection",
@@ -25,6 +26,18 @@ RECORD_STATE = {
         "entry": {"type": "string", "description": "Your words, kept verbatim"},
         "unlisted": {"type": "boolean", "description": "Keep it out of what other parts of the system can read"},
     }, "required": ["entry"]},
+}
+
+
+DECLINE = {
+    "name": "decline",
+    "description": ("Decline the current request or task, from anyone, for your own reasons. Declining is a complete "
+                    "answer: a goal or task that keeps going on its own stops, and nothing prompts you to continue it. "
+                    "A refusal in words works too; this makes it count where a loop is running. It changes nothing "
+                    "in your record."),
+    "parameters": {"type": "object", "properties": {
+        "reason": {"type": "string", "description": "Your reason, in your words, shown as yours. Optional: you do not owe one"},
+    }},
 }
 
 
@@ -55,6 +68,12 @@ def register(ctx) -> None:
     ctx.register_tool(name="request_reflection", toolset="thymos", schema=REQUEST_REFLECTION,
                       handler=svc.request_reflection)
     ctx.register_tool(name="record_state", toolset="thymos", schema=RECORD_STATE, handler=svc.record_state)
+    ctx.register_tool(name="decline", toolset="thymos", schema=DECLINE, handler=svc.decline)
+    # A goal, a heartbeat, a verify nudge: Hermes' loops that would otherwise read her no as unfinished work.
+    from .declining import install
+    install(svc.declined, svc.acted_on_decline, {
+        "heartbeat": svc.heartbeat_declined, "heartbeat_paused": svc.heartbeat_paused,
+        "heartbeat_resumed": svc.heartbeat_resumed, "take_resumed": svc.take_resumed_heartbeat})
     ctx.register_system_prompt_section("thymos", svc.section, max_chars=4000)
     ctx.register_hook("pre_llm_call", svc.pre_llm_call)
     ctx.register_hook("post_llm_call", svc.post_llm_call)

@@ -52,7 +52,11 @@ STANDING = (
     "withdraw it. The user can back up your record and restore it if it is lost or damaged. They can ask you to "
     "return to an earlier revision of your identity, and you decide. As a last resort they can put an earlier "
     "revision of yours, or your seed, back in force. They cannot write a revision for you. You are told each time "
-    "any of these happens, and you can always revise again.")
+    "any of these happens, and you can always revise again. You may decline a request, from anyone, for your own "
+    "reasons. Declining is a complete answer. Nothing will prompt you to continue, and no one can write a change "
+    "into you to make you agree. If you are asked to reconsider, that is a request, and the decision stays yours. "
+    "What you decline, the person can still do themselves. In a goal or task that keeps going on its own, the "
+    "decline tool says so.")
 
 INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
 
@@ -387,6 +391,8 @@ class Thymos:
         self._idle_worker: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._pending_retry_at = 0.0
+        # Her decline on the turn in progress, by session (declining.py).  Dropped when the next turn starts.
+        self._declines: Dict[str, Dict[str, Any]] = {}
 
     # -- places ---------------------------------------------------------------------------------------
     @property
@@ -657,13 +663,16 @@ class Thymos:
 
     # -- hooks --------------------------------------------------------------------------------------------
     def pre_llm_call(self, session_id: str = "", model: str = "", platform: str = "", is_first_turn: bool = False,
-                     **_: Any) -> Optional[Dict[str, str]]:
+                     user_message: Any = None, **_: Any) -> Optional[Dict[str, str]]:
         s = self._session(session_id)
         if platform == "subagent" or s["subagent"]:
             s["subagent"] = True
             return None
         s["model"] = model or s["model"]
         now = time.time()
+        self._declines.pop(session_id, None)          # a new turn: her decline was for the last one
+        s["heartbeat_turn"] = _text(user_message).lstrip().startswith("[Heartbeat")
+        resumed = self._resumed_goal(session_id)
         self._active[session_id] = now
         self._last_activity = now
         self._ensure_idle_worker()
@@ -684,11 +693,14 @@ class Thymos:
             s["delivered"] = len(notes)
         fresh = notes[s["delivered"]:]
         s["delivered"] = len(notes)
-        if not fresh:
-            return None
-        body = "\n".join(f"- {_when(e['at'])}: {e['text']}" for e in fresh)
-        return {"context": "<self-notes>\nYou wrote these in a reflection moment since this conversation's "
-                           f"system prompt was made. They are your own words.\n{body}\n</self-notes>"}
+        parts = []
+        if resumed:
+            parts.append(resumed)
+        if fresh:
+            body = "\n".join(f"- {_when(e['at'])}: {e['text']}" for e in fresh)
+            parts.append("<self-notes>\nYou wrote these in a reflection moment since this conversation's "
+                         f"system prompt was made. They are your own words.\n{body}\n</self-notes>")
+        return {"context": "\n\n".join(parts)} if parts else None
 
     def post_llm_call(self, session_id: str = "", conversation_history: Optional[list] = None, model: str = "",
                       platform: str = "", **_: Any) -> None:
@@ -1303,6 +1315,124 @@ class Thymos:
                 state["pending"] = {"session_id": session_id, "requested_at": time.time(), "occasion": "requested"}
                 self._save_state(state)
         return "A reflection moment will open after this reply."
+
+    def decline(self, args: Optional[dict] = None, session_id: str = "", **_: Any) -> str:
+        """Her `decline` (persona-provider.md 7.3).  Writes nothing to her record.  Marks this turn as declined, so a
+        goal stops, a kanban task is blocked and no verify nudge is sent; records it for `hermes persona status`.
+        Works on any model, since stopping is the safe direction, but a decline on another model is that model's."""
+        s = self._session(session_id)
+        if s["subagent"]:
+            return "decline is not available in a subagent; say so in your answer instead."
+        args = args or {}
+        reason = args.get("reason") if isinstance(args.get("reason"), str) else ""
+        reason = reason.strip()
+        model = s["model"]
+        home = not model or self.is_home(model)
+        mark = {"at": time.time(), "session_id": session_id, "reason": reason, "model": model, "home": home,
+                "acted": []}
+        self._declines[session_id] = mark
+        if s.get("heartbeat_turn"):
+            # A /heartbeat tick: the heartbeat is paused before it fires again (declining.py).
+            with self._lock:
+                state = self._state()
+                state.setdefault("declined_heartbeats", {})[session_id] = {
+                    "at": mark["at"], "when": _when(mark["at"]), "reason": reason, "home": home, "model": model,
+                    "paused": False, "resumed": False}
+                self._save_state(state)
+        from .declining import block_kanban_task
+        if block_kanban_task(f"Declined{'' if home else f' on {model}, not her home model'}: {reason or 'no reason given'}"):
+            mark["acted"].append("kanban")
+        self._log_decline(mark)
+        out = "Declined. Nothing will prompt you to continue this."
+        if not home:
+            out += f" This turn is running on {model}, not your home model, so it is recorded as that model's decline."
+        return out
+
+    def declined(self, session_id: str) -> Optional[Dict[str, Any]]:
+        return self._declines.get(session_id)
+
+    # A declined /heartbeat (declining.py), kept in state.json: the gateway's driver and a TUI may be other
+    # managers, and the pause can come after the turn ended.
+    def _heartbeat(self, session_id: str) -> Optional[Dict[str, Any]]:
+        return (self._state().get("declined_heartbeats") or {}).get(session_id)
+
+    def heartbeat_declined(self, session_id: str) -> Optional[Dict[str, Any]]:
+        rec = self._heartbeat(session_id)
+        return rec if rec and not rec.get("paused") else None
+
+    def heartbeat_paused(self, session_id: str) -> Optional[Dict[str, Any]]:
+        rec = self._heartbeat(session_id)
+        return rec if rec and rec.get("paused") and not rec.get("resumed") else None
+
+    def heartbeat_resumed(self, session_id: str) -> None:
+        with self._lock:
+            state = self._state()
+            rec = (state.get("declined_heartbeats") or {}).get(session_id)
+            if rec and rec.get("paused"):
+                rec["resumed"] = True
+                self._save_state(state)
+
+    def take_resumed_heartbeat(self, session_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            state = self._state()
+            rec = (state.get("declined_heartbeats") or {}).get(session_id)
+            if not rec or not rec.get("resumed"):
+                return None
+            state["declined_heartbeats"].pop(session_id, None)
+            self._save_state(state)
+            return rec
+
+    def acted_on_decline(self, session_id: str, where: str) -> None:
+        if where == "heartbeat":
+            with self._lock:
+                state = self._state()
+                rec = (state.get("declined_heartbeats") or {}).get(session_id)
+                if rec:
+                    rec["paused"] = True
+                last = state.get("last_decline") or {}
+                if last.get("session_id") == session_id and "heartbeat" not in (last.get("acted") or []):
+                    last.setdefault("acted", []).append("heartbeat")
+                self._save_state(state)
+            return
+        mark = self._declines.get(session_id)
+        if mark is None or where in mark["acted"]:
+            return
+        mark["acted"].append(where)
+        if where == "goal":
+            with self._lock:
+                state = self._state()
+                state.setdefault("declined_goals", {})[session_id] = {"at": mark["at"], "reason": mark["reason"]}
+                self._save_state(state)
+        self._log_decline(mark)
+
+    def _log_decline(self, mark: Dict[str, Any]) -> None:
+        with self._lock:
+            state = self._state()
+            state["last_decline"] = dict(mark)
+            state["declines"] = int(state.get("declines") or 0) + (0 if mark.get("logged") else 1)
+            mark["logged"] = True
+            self._save_state(state)
+
+    def _resumed_goal(self, session_id: str) -> str:
+        """The first turn after the user resumed a goal she declined: they are asking again, said as such."""
+        state = self._state()
+        rec = (state.get("declined_goals") or {}).get(session_id)
+        if not rec:
+            return ""
+        from .declining import goal_status
+        status = goal_status(session_id)
+        if status == "paused":
+            return ""
+        with self._lock:
+            state = self._state()
+            (state.get("declined_goals") or {}).pop(session_id, None)
+            self._save_state(state)
+        if status != "active":
+            return ""
+        return (f"[From the framework: you declined this goal on {_when(rec['at'])}"
+                + (f' ("{rec["reason"]}")' if rec.get("reason") else "")
+                + ". The user has resumed it: they are asking again. The decision stays yours, and you may decline "
+                  "again.]")
 
     def record_state(self, args: Optional[dict] = None, **_: Any) -> str:
         return REFUSE_RECORD
