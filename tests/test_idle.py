@@ -47,7 +47,7 @@ def test_a_quiet_conversation_is_offered_to_her_and_her_account_is_handed_over(t
     assert len(handed) == 1
     item = json.loads(handed[0].read_text())
     assert item["account"] == acc[0]["text"] and item["entry_hash"] == acc[0]["hash"] and item["session_id"] == "s1"
-    assert item["service"] == "thymos/0.3.0"
+    assert item["service"] == "thymos/0.4.0"
     assert svc.chain.verify(soul_text=svc.soul()) == []
     assert idle(svc) is None and len(llm.calls) == 1                       # offered once
     # the conversation goes on: offered again later, and told what happened the first time
@@ -169,7 +169,7 @@ def test_registering_tells_the_memory_provider_a_persona_service_is_running(tmp_
         return                                                             # needs Hermes' environment
     try:
         thymos.register(ctx)
-        assert os.environ[SERVICE_ENV] == "thymos/0.3.0 accounts=1 idle=1"
+        assert os.environ[SERVICE_ENV] == "thymos/0.4.0 accounts=1 idle=1 slept=1 old_notes=1"
         assert "on_session_finalize" in got["hooks"]
     finally:
         if old is None:

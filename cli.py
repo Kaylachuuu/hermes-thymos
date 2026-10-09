@@ -91,6 +91,31 @@ def _idle_lines(svc: Thymos, state: dict) -> list:
     accounts = sum(1 for e in svc.chain.entries() if e.get("kind") == "account")
     out.append(f"her accounts: {accounts} in her record; {stored} stored by the memory provider, {waiting} waiting for it"
                + (" (it stores them while Hermes is open, if it reads them: holonomic 0.25 or later)" if waiting else ""))
+    slept = len(list((svc.data / "slept").glob("*.json"))) if (svc.data / "slept").exists() else 0
+    ls = state.get("last_slept")
+    line = f"after memory slept: {slept} waiting to be offered to her"
+    if ls:
+        line += f"; last moment {_when(ls['at'])}"
+        if "dream_thoughts" in ls:
+            line += (f", she wrote about {ls['dream_thoughts']} of {ls['dreams']} dream(s)" if ls["dream_thoughts"]
+                     else f", she wrote nothing about the dream{'s' if ls.get('dreams', 1) > 1 else ''}")
+            if ls.get("wrote"):
+                line += f" and {ls['wrote']} entr{'y' if ls['wrote'] == 1 else 'ies'}"
+            line += f" on {ls.get('model')}"
+        if ls.get("problem"):
+            line += f"; {ls['problem']}"
+    out.append(line)
+    old = svc.data / "old-notes.json"
+    lo = state.get("last_old_notes")
+    if old.exists() or lo:
+        line = "notes another model wrote in her voice: " + ("waiting to be offered to her" if old.exists() else "offered")
+        if lo:
+            line += f"; {_when(lo['at'])}"
+            if "wrote" in lo:
+                line += f", she kept {lo['wrote']} entr{'y' if lo['wrote'] == 1 else 'ies'} in her own words on {lo.get('model')}"
+            if lo.get("problem"):
+                line += f"; {lo['problem']}"
+        out.append(line)
     return out
 
 

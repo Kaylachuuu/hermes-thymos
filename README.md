@@ -3,11 +3,12 @@
 Personality for [Hermes Agent](https://hermes-agent.nousresearch.com): a record of herself that only she
 writes.
 
-Status: **0.3.0, the second slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
-section 10) gave her a record and reflection moments she asks for, and has run on a real install. This one
-adds idle time: she writes her own accounts of conversations that have gone quiet or ended, and holonomic
-(0.25 or later) stores them as her memory of those conversations instead of writing its own. It also adds two
-occasions, a session ending and a return after a gap.
+Status: **0.4.0, the third slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
+section 10) gave her a record and reflection moments she asks for. The second (0.3.0, section 11) added idle
+time: she writes her own accounts of conversations that have gone quiet or ended, and holonomic stores them
+instead of writing its own. This one finishes that handover. After memory sleeps and dreams, she may write what
+she makes of the dream, and holonomic (0.26 or later) keeps her words with it as hers. Once, she is offered the
+notes another model wrote in her voice before her record existed.
 
 0.2.0 replaces 0.1.0's question after every reply. Nothing asks her how she feels any more, and there is
 no intensity number: a moment opens only when she asks for one. 0.1.0's answers stay where they were, in
@@ -51,17 +52,31 @@ Not related to the OpenClaw skill of the same name.
   `plugin-data/thymos/accounts/`. If she stores none, there is none, and nothing is written in its place. A
   conversation is offered once, and again only if it goes on; she is told what happened the first time.
 - **Idle time in order.** A saved request comes first, then the accounts, oldest conversation first, one at a
-  time. Nothing new starts while someone is talking. What is waiting is written to
+  time, then what memory made while it slept, then the old notes. Nothing new starts while someone is talking. What is waiting is written to
   `plugin-data/thymos/idle.json`, and holonomic's own reflection and sleep wait for it. Idle moments never
   hold a turn: only her own request does.
 - **A return after a gap.** The first turn after more than `gap_hours` without one opens a moment after her
   reply, with how long it has been as its only fact. A saved request that could not open (Hermes stopped, or
   the call failed) now also opens at the next idle point, not only at the next session's start.
+- **After memory slept.** When holonomic finishes a sleep that made a dream, it says so in
+  `plugin-data/thymos/slept/`, with the dream's text. At the next idle point, after any accounts, her home
+  model is shown her identity, her notes and the dream, labelled as the memory system's composition that she
+  did not write, with the facts of the sleep. She may write what she makes of it under `"dream_thoughts"`,
+  record entries, both, or nothing. Her words go into her record (kind `dream_thoughts`) and back to holonomic
+  in `plugin-data/thymos/dream-thoughts/`, which keeps them with the dream as hers. A sleep without a dream is
+  not offered: there is nothing in it to write about.
+- **The notes another model wrote.** Once, holonomic offers the self notes, relationship notes and the two
+  profiles its reflection model wrote in her voice, in `plugin-data/thymos/old-notes.json`. She is shown them
+  as that model's, dated, and told this is the only time. Anything she records is kept in her own words;
+  nothing from them is kept as hers otherwise. Holonomic leaves the notes as they are, labelled as that
+  model's.
 - **Holonomic hands over her voice.** Loading thymos sets `HERMES_PERSONA_SERVICE` in Hermes' process.
   Holonomic 0.25 reads it and stops writing in her voice (see its README, "Alongside a persona service").
+  0.26 also reads `slept=1` and `old_notes=1` from it, which turn on the two moments above.
 - **`hermes persona status`.** Prints her seed, home model, entry counts, the chain check, any pending
   reflection and how the last one went, the conversations waiting for idle time, how the last account
-  moment went, and how many of her accounts the memory provider has stored.
+  moment went, how many of her accounts the memory provider has stored, and how the moments after memory
+  slept and with the old notes went.
 
 Subagents get neither her notes nor her tools.
 
@@ -85,6 +100,9 @@ No Python packages are needed beyond what Hermes has.
 | `plugin-data/thymos/state.json` | A pending request, and how the last moments went. Not part of her record |
 | `plugin-data/thymos/conversations/` | Each conversation as of its last turn, kept for idle time, with what was offered to her |
 | `plugin-data/thymos/accounts/` | Her accounts, handed to the memory provider; it moves each to `stored/` once it has it |
+| `plugin-data/thymos/slept/` | Holonomic's word that it slept, with the dreams; each moves to `done/` with what became of it |
+| `plugin-data/thymos/dream-thoughts/` | Her words on a dream, handed to holonomic; it moves each to `stored/` once it has it |
+| `plugin-data/thymos/old-notes.json` | The notes another model wrote in her voice, offered once; moved to `done/` after |
 | `plugin-data/thymos/idle.json` | What is waiting for idle time, rewritten every `poll_seconds`, for holonomic to wait on |
 
 ## Settings
@@ -133,10 +151,9 @@ The design puts this in Hermes core. As a plugin it has these limits:
 
 ## Not in this slice
 
-Revisions to her identity, multi-user scope, backup and restore, the override, `decline`, the other
-occasions (compression, delegation, a tamper notice, a changed seed, memory having slept), and the offer of
-holonomic's old self notes. All of these are designed in `persona-provider.md`, and the record format
-already has their fields.
+Revisions to her identity, multi-user scope, backup and restore, the override, `decline`, and the other
+occasions (compression, delegation, a tamper notice, a changed seed). All of these are designed in
+`persona-provider.md`, and the record format already has their fields.
 
 ## Testing
 
@@ -149,4 +166,4 @@ hook dispatch, tool registry, prompt sections, CLI wiring and `ctx.llm`, with on
 replaced. It needs Hermes' Python environment (set `HERMES_SRC` to a checkout, or keep a `hermes-agent`
 checkout next to this folder, and run with Hermes' Python). Without that environment it returns without checking anything, so a pass there means nothing.
 
-Expected result: all 31 tests pass. Only in Hermes' environment does `test_hermes.py` check anything.
+Expected result: all 37 tests pass. Only in Hermes' environment does `test_hermes.py` check anything.

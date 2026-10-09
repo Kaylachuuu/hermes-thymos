@@ -7,7 +7,7 @@ so that holonomic stops writing in her voice (holonomic's persona.py).
 """
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 REQUEST_REFLECTION = {
     "name": "request_reflection",
@@ -46,7 +46,9 @@ def register(ctx) -> None:
 
     # Read by holonomic, which loads in the same process.  accounts=1: she writes her own accounts of
     # conversations, left in plugin-data/thymos/accounts/.  idle=1: what she has waiting is in idle.json.
-    os.environ[SERVICE_ENV] = f"thymos/{__version__} accounts=1 idle=1"
+    # slept=1: after a sleep that made a dream, tell her in slept/; her words on it come back in dream-thoughts/.
+    # old_notes=1: offer her, once, the notes another model wrote in her voice, in old-notes.json.
+    os.environ[SERVICE_ENV] = f"thymos/{__version__} accounts=1 idle=1 slept=1 old_notes=1"
 
     svc = Thymos(get_hermes_home, llm=ctx.llm, config=_config(ctx))
     ctx.register_tool(name="request_reflection", toolset="thymos", schema=REQUEST_REFLECTION,
