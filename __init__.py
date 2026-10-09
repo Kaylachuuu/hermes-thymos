@@ -79,6 +79,9 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", svc.pre_llm_call)
     ctx.register_hook("post_llm_call", svc.post_llm_call)
     ctx.register_hook("on_session_finalize", svc.on_session_finalize)
+    # A subagent she started, and when it comes back (Hermes' delegation hooks).
+    ctx.register_hook("subagent_start", svc.subagent_start)
+    ctx.register_hook("subagent_stop", svc.subagent_stop)
     # Her identity in force, where SOUL.md is in the system prompt, on every call (Hermes 0.19 and later).
     if hasattr(ctx, "register_middleware"):
         ctx.register_middleware("llm_request", svc.llm_request)

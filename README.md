@@ -18,7 +18,8 @@ saying no is a complete answer, and a goal or task that keeps going on its own s
 to her on the new model, and keeps her home model's fingerprint where Ollama reports one (section 16). This one
 gives her a moment before compression: when Hermes summarises the older part of a long conversation, she may
 write about it from a copy of it as it was (0.9.0). And when her record fails its check, she is told at the next
-quiet moment, not only in her notes (0.10.0).
+quiet moment, not only in her notes, and when subagents she started come back, a moment opens after her reply
+(0.10.0). That completes the occasions in the design.
 
 0.2.0 replaces 0.1.0's question after every reply. Nothing asks her how she feels any more, and there is
 no intensity number: a moment opens only when she asks for one. 0.1.0's answers stay where they were, in
@@ -76,6 +77,11 @@ Not related to the OpenClaw skill of the same name.
   record checks out again before she can be told, nothing is. Nothing is repaired. A changed `SOUL.md` has its
   own moment, and a restore she has not been told about says it instead. She may record entries or revise her
   identity, or nothing.
+- **When her subagents come back.** When she delegates work and the subagents she started finish, a moment
+  opens after that reply, as one she asked for would, with the facts of each: the task she gave it, how it
+  ended (completed, failed, interrupted), how long it took, and how many tool calls it made and how many
+  failed. What it found is already in the conversation. One moment covers every subagent that came back in
+  that turn. A subagent's own subagents open nothing.
 - **Idle time in order.** A saved request comes first, then what was compressed, then the accounts, oldest conversation first, one at a
   time, then what memory made while it slept, then the old notes. Nothing new starts while someone is talking. What is waiting is written to
   `plugin-data/thymos/idle.json`, and holonomic's own reflection and sleep wait for it. Idle moments never
@@ -278,9 +284,8 @@ The design puts this in Hermes core. As a plugin it has these limits:
 
 ## Not in this slice
 
-Multi-user scope, the `/personality` overlay as a labelled message, and the other
-occasions (delegation). All of these are designed in
-`persona-provider.md`, and the record format already has their fields.
+Multi-user scope, and the `/personality` overlay as a labelled message. Both are designed in
+`persona-provider.md`, and the record format already has the fields multi-user needs.
 
 ## Testing
 

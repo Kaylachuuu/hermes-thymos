@@ -467,6 +467,9 @@ class Thymos:
         self._pending_retry_at = 0.0
         # Her decline on the turn in progress, by session (declining.py).  Dropped when the next turn starts.
         self._declines: Dict[str, Dict[str, Any]] = {}
+        # Subagents she started (delegation), by her session: the task she gave each, and how each finished.
+        self._goals: Dict[str, str] = {}
+        self._delegations: Dict[str, List[Dict[str, Any]]] = {}
         # Her home model's fingerprint (models.py), asked for at most every few minutes.
         self.fingerprinter: Callable[[str, str], str] = mdl.fingerprint
         self._prints: Dict[str, Tuple[str, float]] = {}
@@ -864,10 +867,17 @@ class Thymos:
             state = self._state()
             state["last_turn_at"] = time.time()
             gap = s.pop("gap_hours", None)
+            finished = self._delegations.pop(session_id, None)
             if gap and not state.get("pending"):
                 # Back after a gap: a fact core can observe without judging her or the conversation.
                 state["pending"] = {"session_id": session_id, "requested_at": time.time(), "occasion": "returned after a gap",
                                     "facts": {"hours_since_your_last_conversation": gap}}
+            elif finished and not state.get("pending"):
+                # Subagents she started in this turn came back (4.2, delegation finished): one moment for all of them.
+                state["pending"] = {"session_id": session_id, "requested_at": time.time(),
+                                    "occasion": "a subagent you started finished" if len(finished) == 1 else
+                                                f"{len(finished)} subagents you started finished",
+                                    "facts": {"subagents": finished}}
             self._save_state(state)
             pending = state.get("pending")
             if not pending or pending.get("session_id") != session_id or not self._done.is_set():
@@ -881,6 +891,31 @@ class Thymos:
             state["pending"] = pending
             self._save_state(state)     # so a restart before the moment opens does not lose it
         self._start(pending, deferred=False)
+
+    def subagent_start(self, parent_session_id: str = "", child_session_id: str = "", child_goal: str = "",
+                       **_: Any) -> None:
+        """Hermes' delegation hook: the task she gave a subagent, kept until it comes back."""
+        if parent_session_id and child_session_id and not self._session(parent_session_id)["subagent"]:
+            self._goals[child_session_id] = str(child_goal or "")[:500]
+
+    def subagent_stop(self, parent_session_id: str = "", child_session_id: str = "", child_status: str = "",
+                      child_role: Any = None, duration_ms: int = 0, tool_call_history: Optional[list] = None,
+                      **_: Any) -> None:
+        """A subagent she started finished.  Facts only: her task, how it ended, how long it took, how many tool
+        calls it made and how many failed.  What it found is in the conversation already, as the tool's result."""
+        if not parent_session_id or self._session(parent_session_id)["subagent"]:
+            return
+        calls = [c for c in tool_call_history or [] if isinstance(c, dict)]
+        fact: Dict[str, Any] = {"task": self._goals.pop(child_session_id or "", "") or "not recorded",
+                                "ended": str(child_status or "unknown"),
+                                "took_seconds": round(int(duration_ms or 0) / 1000), "tool_calls": len(calls)}
+        failed = sum(1 for c in calls if c.get("status") == "error")
+        if failed:
+            fact["tool_calls_failed"] = failed
+        if child_role:
+            fact["role"] = str(child_role)
+        with self._lock:
+            self._delegations.setdefault(parent_session_id, []).append(fact)
 
     def on_session_finalize(self, session_id: Optional[str] = None, reason: str = "", **_: Any) -> None:
         """A real session boundary (/new, /reset, an expired gateway session, Hermes shutting down).  Its
