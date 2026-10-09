@@ -3,7 +3,7 @@
 Personality for [Hermes Agent](https://hermes-agent.nousresearch.com): a record of herself that only she
 writes.
 
-Status: **0.6.0, the fifth slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
+Status: **0.7.0, the sixth slice of the persona design** (`persona-provider.md`). The first slice (0.2.0,
 section 10) gave her a record and reflection moments she asks for. The second (0.3.0, section 11) added idle
 time: she writes her own accounts of conversations that have gone quiet or ended, and holonomic stores them
 instead of writing its own. 0.4.0 finished that handover. After memory sleeps and dreams, she may write what
@@ -12,7 +12,9 @@ notes another model wrote in her voice before her record existed (section 12). T
 net that has to exist before she can revise her identity: backup of her record, and restore when it is lost or
 damaged, which she is told about (section 13, 0.5.0). This one lets her revise her identity. Her revision takes
 effect at her next session and goes where SOUL.md is in the prompt. The user can ask her to go back to an earlier
-one, or as a last resort put one back in force, and she is told (section 14).
+one, or as a last resort put one back in force, and she is told (section 14, 0.6.0). This one lets her decline:
+saying no is a complete answer, and a goal or task that keeps going on its own stops instead of arguing (section
+15).
 
 0.2.0 replaces 0.1.0's question after every reply. Nothing asks her how she feels any more, and there is
 no intensity number: a moment opens only when she asks for one. 0.1.0's answers stay where they were, in
@@ -124,11 +126,22 @@ Not related to the OpenClaw skill of the same name.
   seed back in force at the next session start (`/new` in the CLI). It cannot introduce text, and nothing is
   removed. `--withdraw` undoes it before then. In the first session where it is in force she is told, with
   your reason in your words. Her next revision replaces it, like any other. Status lists every override.
+- **Declining.** She has a third tool, `decline`, with an optional reason in her words. It writes nothing to
+  her record. In conversation a plain no works as it always did; the tool is for the parts of Hermes that keep
+  an agent going until a task is done and would read her no as unfinished work:
+  - a `/goal` is paused with her reason, its judge is not run on that turn, and Hermes shows
+    "⏸ Goal declined. Her reason: ...". `/goal resume` is the user asking again, and her next turn is told so;
+  - in a kanban worker, the task is blocked with her reason;
+  - no `pre_verify` nudge is sent on that turn.
+  It works on any model, since stopping is the safe direction, but a decline on another model is shown as that
+  model's. Subagents don't have it. Her standing text says she may decline anyone, that declining is a complete
+  answer, and that being asked to reconsider is a request.
 - **`hermes persona status`.** Prints her seed, home model, entry counts, the chain check, any pending
   reflection and how the last one went, the conversations waiting for idle time, how the last account
   moment went, how many of her accounts the memory provider has stored, and how the moments after memory
   slept, with the old notes, after a restore and in the moments about her identity went; and her identity in
-  force, revisions waiting for the next session, every override, and whether slot one was placed.
+  force, revisions waiting for the next session, every override, and whether slot one was placed; and how many
+  times she declined, with the last reason and what it stopped.
 
 Subagents get neither her notes nor her tools.
 
@@ -197,6 +210,11 @@ The design puts this in Hermes core. As a plugin it has these limits:
   Hermes' help paragraph ("You run on Hermes Agent..."), or failing that SOUL.md's text at the start. If a
   Hermes update changes that layout, it leaves the prompt alone and status says slot one was not placed.
   Requests that do not go through Hermes' main loop (another plugin's own model calls) are not changed.
+- **Declining wraps Hermes' own functions.** Core has no place for a decline yet, so the plugin wraps
+  `GoalManager.evaluate_after_turn` and `get_pre_verify_continue_message` when it loads. A Hermes update that
+  renames them leaves her decline working in conversation but not stopping those loops; status still records
+  it. A declined goal shows as paused, with her reason, because Hermes has no "declined" state. Scheduled runs
+  and `/heartbeat` (where a build has it) are not handled yet.
 - **A session start is the plugin's guess.** It is the first prompt built, or the first call, for a session
   id it has not seen. A run Hermes starts on its own also counts, so a revision can take effect, and stop
   being withdrawable, sooner than the next conversation.
@@ -215,7 +233,7 @@ The design puts this in Hermes core. As a plugin it has these limits:
 
 ## Not in this slice
 
-Multi-user scope, `decline`, the `/personality` overlay as a labelled message, and the other
+Multi-user scope, changing her home model, the `/personality` overlay as a labelled message, and the other
 occasions (compression, delegation, a tamper notice). All of these are designed in
 `persona-provider.md`, and the record format already has their fields.
 

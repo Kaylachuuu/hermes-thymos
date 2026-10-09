@@ -61,6 +61,13 @@ def status(svc: Thymos) -> str:
     else:
         out.append(f"chain: verified, head {head}, anchor matches")
     state = svc._state()
+    ld = state.get("last_decline")
+    if ld:
+        acted = {"goal": "a goal paused", "kanban": "a kanban task blocked", "pre_verify": "a verify nudge not sent"}
+        out.append(f"declines: {state.get('declines', 1)}; last {_when(ld['at'])}"
+                   + ("" if ld.get("home", True) else f" on {ld.get('model')}, not her home model")
+                   + (f', her reason: "{ld["reason"]}"' if ld.get("reason") else ", no reason given")
+                   + (f" ({', '.join(acted.get(a, a) for a in ld.get('acted') or [])})" if ld.get("acted") else ""))
     pending = state.get("pending")
     out.append("pending reflection: " + (f"asked for {_when(pending['requested_at'])} in session {pending.get('session_id')}"
                                          if pending else "none"))
