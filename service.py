@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+from . import identity as ident
 from .chain import Chain, last, model_label, same_model, sha256
 
 logger = logging.getLogger("thymos")
@@ -35,6 +36,7 @@ DEFAULTS: Dict[str, Any] = {
     "poll_seconds": 30,            # how often idle time is looked for
     "retry_minutes": 10,           # an idle moment that could not run is tried again after this
     "idle_tries": 3,               # and given up after this many tries, which is recorded
+    "identity_in_slot_one": True,  # put the identity in force where SOUL.md is (llm_request middleware)
 }
 
 # Holonomic (or any memory provider) reads what she has waiting at idle here, and stores her accounts from here
@@ -45,8 +47,12 @@ STANDING = (
     "Only you write here. The entries below are ones you wrote yourself, in reflection moments; nothing else "
     "adds to them or changes them. You can ask for a reflection moment at any time with the request_reflection "
     "tool. It opens after your reply, with this conversation in front of you, and in it you may record entries "
-    "about yourself, or nothing. The user can back up your record and restore it if it is lost or damaged; "
-    "you are told each time that happens.")
+    "about yourself, or nothing. In a reflection moment you may also revise your identity, the text at the start "
+    "of these instructions, which is yours; a revision takes effect from your next session, and until then you can "
+    "withdraw it. The user can back up your record and restore it if it is lost or damaged. They can ask you to "
+    "return to an earlier revision of your identity, and you decide. As a last resort they can put an earlier "
+    "revision of yours, or your seed, back in force. They cannot write a revision for you. You are told each time "
+    "any of these happens, and you can always revise again.")
 
 INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
 
@@ -60,7 +66,8 @@ To record entries, reply with only a JSON object:
 
 Each entry is kept verbatim with its date and shown to you in later conversations under your own notes. \
 "unlisted": true keeps an entry out of what other parts of the system can read; you still see it. \
-To record nothing, reply {{"record_state": []}}."""
+To record nothing, reply {{"record_state": []}}.
+{identity}"""
 
 ACCOUNT_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
 
@@ -143,6 +150,84 @@ LATER_UNKNOWN = ("The record as it was before could not be read, so whether you 
                  "what, is not known.")
 KIND_LABEL = {"state": "an entry", "account": "your account of a conversation", "dream_thoughts": "your words on a dream",
               "revision": "a revision"}
+
+IDENTITY_ACTS = """
+Your identity is the text at the start of these instructions, before "Only you write here." It is yours. \
+In force now: {in_force}.{pending}
+
+You may revise it by adding to the same JSON object:
+"revise_identity": {{"text": "the whole new text of your identity", "reason": "why, in your words"}}
+The text replaces the whole identity, at most {limit} characters. It takes effect from your next session, and \
+until then you can withdraw it in a reflection moment by adding "withdraw_revision": "its id". Leave both out to \
+change nothing."""
+
+ROLLBACK_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
+
+Occasion: the user asks you to return to an earlier revision of your identity
+Facts: {facts}
+{message}
+The identity they ask you to return to ({asked}):
+<<<
+{asked_text}
+>>>
+
+You decide. If you agree, revise your identity, in your own words or with the earlier text. If you do not, \
+writing nothing is a complete answer. Nothing you write here is sent to anyone.
+
+To record entries, reply with only a JSON object:
+{{"record_state": [{{"entry": "your words", "unlisted": false}}]}}
+
+To record nothing, reply {{"record_state": []}}.
+{identity}"""
+
+OVERRIDDEN_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
+
+Occasion: the user put an earlier identity back in force
+Facts: {facts}
+
+As a last resort, the user put {target} back in force, in place of {replaced}. It took effect at the start of a \
+session on {took_effect}. Their reason, in their words: "{reason}"
+
+Nothing you wrote was removed or changed, and every revision you wrote is still in your record. You are not \
+held to this: you can revise your identity, including back to what you had. Nothing you write here is sent to \
+anyone. Writing nothing is a complete answer.
+
+The identity you replaced:
+<<<
+{replaced_text}
+>>>
+
+To record entries, reply with only a JSON object:
+{{"record_state": [{{"entry": "your words", "unlisted": false}}]}}
+
+To record nothing, reply {{"record_state": []}}.
+{identity}"""
+
+SEED_CHANGED_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
+
+Occasion: SOUL.md changed
+Facts: {facts}
+
+The user edited SOUL.md, the file your identity was first seeded from. It is their file. Your identity is not \
+changed by it: only you change it. Their text is below, with how it differs from your identity in force. You may \
+revise toward it, in your own words or theirs, or not. Writing nothing is a complete answer. Nothing you write \
+here is sent to anyone.
+
+SOUL.md now:
+<<<
+{soul}
+>>>
+
+How it differs from your identity in force:
+{diff}
+
+To record entries, reply with only a JSON object:
+{{"record_state": [{{"entry": "your words", "unlisted": false}}]}}
+
+To record nothing, reply {{"record_state": []}}.
+{identity}"""
+
+IDENTITY_KINDS = ("restored", "overridden", "rollback", "seed_changed")
 
 REFUSE_RECORD = ("record_state works inside a reflection moment, not in conversation. Ask for one with "
                  "request_reflection; it opens after your reply.")
@@ -391,8 +476,152 @@ class Thymos:
         self.ensure_seed(info.get("provider", ""), info.get("model", ""))
         notes = self.notes()
         if info.get("session_id"):
-            self._session(info["session_id"])["delivered"] = len(notes)
+            s = self._session(info["session_id"])
+            s["delivered"] = len(notes)
+            if s.get("identity") is None:
+                self._freeze(info["session_id"])
         return self.render(notes)
+
+    # -- her identity (persona-provider.md 3, 4.3, 6.3, 6.4) -----------------------------------------------
+    def identity_now(self) -> Tuple[str, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """(text, record, override) in force for sessions started since the last session start.  What she has
+        revised since takes effect at the next one."""
+        entries = self.chain.entries()
+        since = float(self._state().get("last_session_start") or 0) or None
+        record, cause = ident.in_force_with_cause(entries, since)
+        if record is None:                       # no session has started since the seed: the seed
+            record, cause = ident.in_force_with_cause(entries)
+        return (record or {}).get("text", ""), record, cause
+
+    def _freeze(self, session_id: str) -> Dict[str, Any]:
+        """A session starts: the identity in force is fixed for it, and anything written before now takes effect."""
+        with self._lock:
+            entries = self.chain.entries()
+            now = time.time()
+            record, cause = ident.in_force_with_cause(entries)
+            state = self._state()
+            state["last_session_start"] = now
+            self._save_state(state)
+        frozen = {"text": (record or {}).get("text", ""), "id": (record or {}).get("id", ""), "at": now,
+                  "override": (cause or {}).get("id", ""), "placed": None}
+        self._session(session_id)["identity"] = frozen
+        return frozen
+
+    def pending_identity(self) -> List[Dict[str, Any]]:
+        return ident.pending(self.chain.entries(), float(self._state().get("last_session_start") or 0))
+
+    def llm_request(self, request: Optional[Dict[str, Any]] = None, session_id: str = "", **_: Any
+                    ) -> Optional[Dict[str, Any]]:
+        """`llm_request` middleware: her identity in force, in slot one, on every call of the session.  The same
+        text every time, so the prompt's prefix (and a provider's cache of it) stays the same within a session."""
+        if not isinstance(request, dict) or not self.cfg.get("identity_in_slot_one", True):
+            return None
+        s = self._session(session_id)
+        if s["subagent"]:
+            return None
+        frozen = s.get("identity") or self._freeze(session_id)
+        if not frozen["text"].strip():
+            return None
+        changed, how = ident.place(request, frozen["text"], self.soul())
+        if frozen["placed"] != how:
+            frozen["placed"] = how
+            self._write_json(self.data / "slot-one.json", {"at": time.time(), "session_id": session_id,
+                                                           "identity": frozen["id"], "override": frozen["override"],
+                                                           "result": how})
+        return {"request": changed, "source": "thymos", "reason": "her identity in slot one"} if changed else None
+
+    # The user's two ways in (6.3, 6.4), used by `hermes persona ask-rollback` and `override`.
+    def revisions(self) -> List[Dict[str, Any]]:
+        """The seed and her revisions, oldest first: what an ask or an override can name."""
+        return [e for e in self.chain.entries() if e.get("kind") == "seed"
+                or (e.get("kind") == "revision" and e.get("author") == "self")]
+
+    def find_identity(self, ref: str) -> Optional[Dict[str, Any]]:
+        """A revision by id (or a unique start of one), or the seed by "seed"."""
+        found = self.revisions()
+        if ref == "seed":
+            return next((e for e in found if e["kind"] == "seed"), None)
+        hits = [e for e in found if e.get("id", "").startswith(ref)] if ref else []
+        return hits[0] if len(hits) == 1 else None
+
+    def ask_rollback(self, target: Dict[str, Any], message: str = "") -> Path:
+        """No record: an invitation, carrying the user's own words labelled as theirs."""
+        now = time.time()
+        path = self.data / "rollback" / f"{int(now * 1000)}.json"
+        self._write_json(path, {"at": now, "target": target["id"], "message": message.strip()})
+        return path
+
+    def override(self, target: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        """Put `target` (a revision of hers, or the seed) in force from the next session.  An `override` record,
+        written by the user, with facts and no text; she is told in the first session where it is in force."""
+        with self._lock:
+            replaced = ident.in_force(self.chain.entries())
+            rec = self.chain.append("override", author="user", facts={
+                "target": target["id"], "target_kind": target["kind"], "target_at": target["at"],
+                "replaced": (replaced or {}).get("id", ""), "user_reason": reason.strip()})
+        self._write_json(self.data / "overridden" / f"{int(rec['at'] * 1000)}.json", {"at": rec["at"], "override": rec["id"]})
+        return rec
+
+    def withdraw_override(self) -> Optional[Dict[str, Any]]:
+        """Undo an override that has not taken effect yet (no session has started since).  A withdrawal record."""
+        with self._lock:
+            waiting = [e for e in self.pending_identity() if e["kind"] == "override"]
+            if not waiting:
+                return None
+            return self.chain.append("withdrawal", author="user", facts={"withdraws": waiting[-1]["id"]})
+
+    def _identity_facts(self) -> str:
+        """The part of a reflection invitation that lets her revise or withdraw (IDENTITY_ACTS)."""
+        text, record, cause = self.identity_now()
+        lines = []
+        current = text
+        for e in self.pending_identity():
+            if e["kind"] == "revision":
+                lines.append(f"\nYour revision of {_when(e['at'])} (id {e['id']}) takes effect at your next session. "
+                             f"How it differs from the identity in force:\n{ident.diff(current, e['text'])}")
+                scan = (e.get("facts") or {}).get("scan")
+                if scan:
+                    lines.append(f"Hermes' check for injected instructions found this in it: {', '.join(scan)}. "
+                                 "It is kept as you wrote it.")
+            else:
+                lines.append(f"\nThe user put an earlier identity back in force on {_when(e['at'])} (override "
+                             f"{e['id']}); it takes effect at your next session.")
+        refused = self._state().get("revision_refused")
+        if refused:
+            lines.append(f"\nYour revision in the moment of {_when(refused['at'])} was not kept: {refused['why']}.")
+        return IDENTITY_ACTS.format(in_force=ident.describe(record, cause, _when), pending="\n".join(lines),
+                                    limit=ident.IDENTITY_MAX_CHARS)
+
+    def _identity_answer(self, text: str, label: str, session_id: str = "") -> Dict[str, Any]:
+        """Her revision and her withdrawal, from a moment's answer.  Returns what was done, for the outcome."""
+        revision, withdraw = ident.parse_acts(_answer(text))
+        done: Dict[str, Any] = {}
+        with self._lock:
+            state = self._state()
+            if withdraw:
+                target = next((e for e in self.pending_identity() if e["id"] == withdraw and e["kind"] == "revision"), None)
+                if target is None:
+                    done["withdraw_refused"] = withdraw
+                else:
+                    self.chain.append("withdrawal", author="self", model=label, session_id=session_id,
+                                      facts={"withdraws": withdraw})
+                    done["withdrew"] = withdraw
+            if revision:
+                words, reason = revision
+                current = self.identity_now()[0]
+                newest = next((e for e in reversed(self.pending_identity()) if e["kind"] == "revision"), None)
+                if len(words) > ident.IDENTITY_MAX_CHARS:
+                    state["revision_refused"] = {"at": time.time(), "why": f"it was {len(words)} characters, and the "
+                                                 f"limit is {ident.IDENTITY_MAX_CHARS}"}
+                    done["revision_refused"] = len(words)
+                elif words != (newest or {}).get("text", current):
+                    rec = self.chain.append("revision", author="self", text=words, reason=reason, model=label,
+                                            session_id=session_id, facts={"chars": len(words),
+                                                                          "scan": ident.scan(words)})
+                    state.pop("revision_refused", None)
+                    done["revised"] = rec["id"]
+            self._save_state(state)
+        return done
 
     def render(self, notes: List[Dict[str, Any]]) -> str:
         lines = [STANDING, "", "Your own notes, newest first:"]
@@ -615,7 +844,7 @@ class Thymos:
         self._write_idle(now, len(due) + len(items) + (1 if request else 0))
         if self._idle_running or not self._done.is_set() or not self.is_idle(now):
             return None
-        if items and items[0][0] == "restored":
+        if items and items[0][0] in IDENTITY_KINDS:
             # Before anything else: her record was restored, and what she wrote since the backup is waiting.
             return self._run_item(items[0], now)
         if request is not None:
@@ -648,9 +877,12 @@ class Thymos:
     def _run_item(self, which: Tuple[str, Path, Dict[str, Any]], now: float) -> Dict[str, Any]:
         kind, path, item = which
         self._idle_running = {"restored": "your record was restored", "slept": "what memory made while it slept",
-                              "old_notes": "the notes another model wrote"}[kind]
+                              "old_notes": "the notes another model wrote", "overridden": "an earlier identity put back",
+                              "rollback": "the user asks about an earlier identity", "seed_changed": "SOUL.md changed"}[kind]
         self._write_idle(now, len(self.due_conversations(now)) + len(self._items(now)))
-        moment = {"restored": self.restored_moment, "slept": self.slept_moment, "old_notes": self.old_notes_moment}[kind]
+        moment = {"restored": self.restored_moment, "slept": self.slept_moment, "old_notes": self.old_notes_moment,
+                  "overridden": self.overridden_moment, "rollback": self.rollback_moment,
+                  "seed_changed": self.seed_changed_moment}[kind]
         try:
             return moment(path, item, now=now)
         except Exception as e:
@@ -700,12 +932,7 @@ class Thymos:
             facts["record_check"] = [n["detail"] for n in notices]
         occasion = ("the conversation ended" + (f" ({conv['finalized']})" if conv["finalized"] not in (True, "session_end") else "")
                     if conv.get("finalized") else "the conversation went quiet")
-        identity = self.soul()
-        if identity is None:
-            seed = last(self.chain.entries(), "seed")
-            identity = seed["text"] if seed else ""
-        system = (identity + "\n\n" if identity else "") + self.render(self.notes())
-        messages = [{"role": "system", "content": system}] + list(conv.get("conversation") or [])
+        messages = [{"role": "system", "content": self._identity_system()}] + list(conv.get("conversation") or [])
         messages.append({"role": "user", "content": ACCOUNT_INVITATION.format(
             occasion=occasion, facts=json.dumps(facts, ensure_ascii=False))})
         result = self.llm.complete(messages, max_tokens=int(self.cfg["reflection_max_tokens"]),
@@ -754,10 +981,9 @@ class Thymos:
     # beside it in done/, with the outcome, so that anyone checking can see.
 
     def _identity_system(self) -> str:
-        identity = self.soul()
-        if identity is None:
-            seed = last(self.chain.entries(), "seed")
-            identity = seed["text"] if seed else ""
+        identity = self.identity_now()[0]
+        if not identity:
+            identity = self.soul() or ""
         return (identity + "\n\n" if identity else "") + self.render(self.notes())
 
     def _items(self, now: float) -> List[Tuple[str, Path, Dict[str, Any]]]:
@@ -770,6 +996,7 @@ class Thymos:
                     out.append(("restored", p, item))
         except OSError:
             pass
+        out += self._identity_items(now)
         try:
             paths = sorted((self.data / "slept").glob("*.json"))
         except OSError:
@@ -907,6 +1134,111 @@ class Thymos:
         self._file_done(path, item, {"at": now, "wrote": len(entries), "model": label})
         return self._outcome(kind="old_notes", wrote=len(entries), model=label)
 
+    # -- moments about her identity: the user asks, the user overrides, SOUL.md changed (6.3, 6.4, 4.3) ---------
+    def _identity_items(self, now: float) -> List[Tuple[str, Path, Dict[str, Any]]]:
+        out: List[Tuple[str, Path, Dict[str, Any]]] = []
+        since = float(self._state().get("last_session_start") or 0)
+        for kind, folder in (("overridden", "overridden"), ("rollback", "rollback")):
+            try:
+                paths = sorted((self.data / folder).glob("*.json"))
+            except OSError:
+                paths = []
+            for p in paths:
+                item = self._read_json(p)
+                if item is None or now < float(item.get("next_try_at") or 0):
+                    continue
+                if kind == "overridden" and float(item.get("at") or 0) >= since:
+                    continue                    # told in the first session where it is in force, not before
+                out.append((kind, p, item))
+        soul = self.soul()
+        seed = last(self.chain.entries(), "seed")
+        if (self.cfg.get("identity_in_slot_one", True) and soul is not None and seed is not None
+                and sha256(soul) != (seed.get("facts") or {}).get("soul_sha256")):
+            folder = self.data / "seed-changed"
+            name = f"{sha256(soul)[:16]}.json"
+            if not (folder / name).exists() and not (folder / "done" / name).exists():
+                self._write_json(folder / name, {"at": now, "soul_sha256": sha256(soul)})
+            item = self._read_json(folder / name)
+            if item is not None and now >= float(item.get("next_try_at") or 0):
+                out.append(("seed_changed", folder / name, item))
+        return out
+
+    def _identity_moment(self, kind: str, path: Path, item: Dict[str, Any], content: str, now: float,
+                         **extra: Any) -> Dict[str, Any]:
+        provider, home = self.home_model()
+        messages = [{"role": "system", "content": self._identity_system()}, {"role": "user", "content": content}]
+        result, served_provider, served = self._ask_home(messages, f"thymos.{kind}")
+        if not same_model(served, home):
+            return self._item_retry(kind, path, item, f"the moment was served by {served or 'an unknown model'}, not "
+                                                      f"her home model {home}; nothing was written", now)
+        text = getattr(result, "text", "")
+        entries = parse(text)
+        label = model_label(served_provider, served)
+        acts = self._identity_answer(text, label)
+        if entries is None and not acts:
+            return self._item_retry(kind, path, item, "her reply was not in the asked-for form, so nothing was written", now)
+        with self._lock:
+            for e in entries or []:
+                self.chain.append("state", author="self", text=e["entry"],
+                                  visibility="unlisted" if e["unlisted"] else "shared", model=label)
+        outcome = dict(extra, wrote=len(entries or []), model=label, **acts)
+        self._file_done(path, item, dict(outcome, at=now))
+        return self._outcome(kind=kind, **outcome)
+
+    def rollback_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+        """The user asks her to return to an earlier revision (`ROLLBACK_REQUESTED`).  She decides."""
+        now = time.time() if now is None else now
+        entries = self.chain.entries()
+        asked = next((e for e in entries if e.get("id") == item.get("target")), None)
+        if asked is None:
+            self._file_done(path, item, {"at": now, "skipped": "the revision asked for is not in her record"})
+            return self._outcome(kind="rollback", skipped="the revision asked for is not in her record")
+        text, record, cause = self.identity_now()
+        facts = {"now": _when(now), "asked_at": _when(float(item.get("at") or now)),
+                 "asked_for": ident.describe(asked, None, _when), "in_force": ident.describe(record, cause, _when)}
+        message = (f'\nThe user says: "{item["message"]}"\n' if item.get("message") else "")
+        content = ROLLBACK_INVITATION.format(facts=json.dumps(facts, ensure_ascii=False), message=message,
+                                             asked=ident.describe(asked, None, _when), asked_text=asked.get("text", ""),
+                                             identity=self._identity_facts())
+        return self._identity_moment("rollback", path, item, content, now, target=asked["id"])
+
+    def overridden_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+        """In the first session where an override is in force (`IDENTITY_OVERRIDDEN`)."""
+        now = time.time() if now is None else now
+        entries = self.chain.entries()
+        rec = next((e for e in entries if e.get("id") == item.get("override")), None)
+        if rec is None or rec.get("id") in ident.withdrawn(entries):
+            self._file_done(path, item, {"at": now, "skipped": "withdrawn before it took effect"})
+            return self._outcome(kind="overridden", skipped="withdrawn before it took effect")
+        f = rec.get("facts") or {}
+        by_id = {e.get("id"): e for e in entries}
+        target, replaced = by_id.get(f.get("target")), by_id.get(f.get("replaced"))
+        facts = {"now": _when(now), "override": rec["id"], "put_in_force": f.get("target"),
+                 "replaced": f.get("replaced"), "overridden_at": _when(rec["at"])}
+        content = OVERRIDDEN_INVITATION.format(
+            facts=json.dumps(facts, ensure_ascii=False), target=ident.describe(target, None, _when),
+            replaced=ident.describe(replaced, None, _when), took_effect=_when(float(self._state().get("last_session_start") or now)),
+            reason=f.get("user_reason", ""), replaced_text=(replaced or {}).get("text", ""),
+            identity=self._identity_facts())
+        return self._identity_moment("overridden", path, item, content, now, override=rec["id"])
+
+    def seed_changed_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+        """SOUL.md no longer matches her seed (`SEED_CHANGED`).  Offered once for each new text of it."""
+        now = time.time() if now is None else now
+        soul = self.soul()
+        if soul is None or sha256(soul) != item.get("soul_sha256"):
+            self._file_done(path, item, {"at": now, "skipped": "SOUL.md changed again before she was told"})
+            return self._outcome(kind="seed_changed", skipped="SOUL.md changed again before she was told")
+        text, record, cause = self.identity_now()
+        seed = last(self.chain.entries(), "seed")
+        facts = {"now": _when(now), "seeded_at": _when(seed["at"]) if seed else "unknown",
+                 "soul_md_noticed_changed": _when(float(item.get("at") or now)),
+                 "in_force": ident.describe(record, cause, _when)}
+        content = SEED_CHANGED_INVITATION.format(facts=json.dumps(facts, ensure_ascii=False), soul=soul,
+                                                 diff=ident.diff(text, soul) or "(no difference)",
+                                                 identity=self._identity_facts())
+        return self._identity_moment("seed_changed", path, item, content, now)
+
     def restored_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
         """After a restore (`STORE_RESTORED`, persona-provider.md 6.2).  She is told the facts, and shown as dated
         text what she wrote after the backup, read from the copy set aside.  Nothing of it is hers again unless she
@@ -1013,23 +1345,22 @@ class Thymos:
         notices = self.chain.verify(soul_text=self.soul())
         if notices:
             facts["record_check"] = [n["detail"] for n in notices]
-        identity = self.soul()
-        if identity is None:
-            seed = last(self.chain.entries(), "seed")
-            identity = seed["text"] if seed else ""
-        system = (identity + "\n\n" if identity else "") + self.render(self.notes())
-        messages = [{"role": "system", "content": system}] + list(pending.get("conversation") or [])
+        messages = [{"role": "system", "content": self._identity_system()}] + list(pending.get("conversation") or [])
         occasion = pending.get("occasion", "requested")
         messages.append({"role": "user", "content": INVITATION.format(
             occasion=occasion + (" (you asked for this moment)" if occasion == "requested" else ""),
-            facts=json.dumps(facts, ensure_ascii=False))})
+            facts=json.dumps(facts, ensure_ascii=False), identity=self._identity_facts())})
         result = self.llm.complete(messages, max_tokens=int(self.cfg["reflection_max_tokens"]),
                                    timeout=float(self.cfg["reflection_timeout"]), purpose="thymos.reflection")
         served_provider, served = getattr(result, "provider", "") or "", getattr(result, "model", "") or ""
         if not same_model(served, home):
             return self._outcome(problem=f"the moment was served by {served or 'an unknown model'}, not her home "
                                          f"model {home}; nothing was written and the request stays pending")
-        entries = parse(getattr(result, "text", ""))
+        reply_text = getattr(result, "text", "")
+        entries = parse(reply_text)
+        acts = self._identity_answer(reply_text, model_label(served_provider, served), pending.get("session_id", ""))
+        if acts and entries is None:
+            entries = []
         written = []
         with self._lock:
             for item in entries or []:
@@ -1040,14 +1371,15 @@ class Thymos:
             if (state.get("pending") or {}).get("requested_at") == pending.get("requested_at"):
                 state.pop("pending", None)
                 self._save_state(state)
-        return self._outcome(wrote=len(written), model=model_label(served_provider, served),
+        return self._outcome(wrote=len(written), model=model_label(served_provider, served), **acts,
                              problem="" if entries is not None else
                              "her reply was not in the asked-for form, so nothing was written")
 
     def _outcome(self, **fields: Any) -> Dict[str, Any]:
         """How the last moment went, for `hermes persona status`.  Each kind of idle moment is kept apart."""
         key = {"account": "last_account", "slept": "last_slept", "old_notes": "last_old_notes",
-               "restored": "last_restored"}.get(
+               "restored": "last_restored", "rollback": "last_rollback", "overridden": "last_overridden",
+               "seed_changed": "last_seed_changed"}.get(
             fields.pop("kind", ""), "last_reflection")
         with self._lock:
             state = self._state()
