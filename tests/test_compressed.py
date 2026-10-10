@@ -85,3 +85,26 @@ def test_compressed_in_place_the_conversation_is_offered_again_as_it_goes_on(tmp
                            {"role": "assistant", "content": "Yes."}, {"role": "user", "content": "And then?"},
                            {"role": "assistant", "content": "Then the garden."}])
     assert [c["session_id"] for c in svc.due_conversations(now=time.time() + 3600)] == ["s1"]
+
+
+def test_a_deleted_conversations_verbatim_copies_go_after_the_grace_period(tmp_path):
+    svc = make(tmp_path, FakeLlm('{"account": "We talked about her talk.", "record_state": []}'))
+    start(svc)
+    turn_end(svc)
+    compressing(svc)
+    gone = {"s1"}
+    svc.session_exists = lambda sid: sid not in gone
+    now = time.time()
+    assert svc.sweep_deleted(now) == [] and svc._conversation_path("s1").exists()       # first seen deleted
+    assert svc.sweep_deleted(now + 29 * 86400) == []                                    # still in the grace period
+    assert svc.sweep_deleted(now + 31 * 86400) == ["s1"]
+    assert not svc._conversation_path("s1").exists() and not list((svc.data / "compressing").glob("*.json"))
+    # A session that comes back (restored) before the period ends is not removed.
+    start(svc, session="s2")
+    turn_end(svc, session="s2")
+    gone = {"s2"}
+    svc.sweep_deleted(now)
+    gone = set()
+    svc.sweep_deleted(now + 1)
+    gone = {"s2"}
+    assert svc.sweep_deleted(now + 31 * 86400) == [] and svc._conversation_path("s2").exists()

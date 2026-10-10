@@ -23,6 +23,8 @@ def make(tmp_path, llm=None, soul="You are Athena. You keep your own counsel."):
     (tmp_path / "SOUL.md").write_text(soul, encoding="utf-8")
     svc = Thymos(tmp_path, llm=llm or FakeLlm(), config={"hold_seconds": 5})
     svc.fingerprinter = lambda provider, model: ""      # no model server in tests
+    svc.compressed_from = lambda session_id: ""         # no session store in tests
+    svc.session_exists = lambda session_id: None        # and so nothing is swept
     return svc
 
 

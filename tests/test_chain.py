@@ -93,3 +93,23 @@ def test_model_names_compare_the_way_providers_spell_them():
     assert same_model("ollama|gemma3:latest", "gemma3")
     assert not same_model("ollama|gemma3:27b", "gemma3:12b")
     assert not same_model("", "gemma3:12b")
+
+
+def test_new_entries_are_salted_and_old_unsalted_ones_still_check_out(tmp_path):
+    import json
+    from thymos.chain import entry_hash
+    c = Chain(tmp_path / "self" / "entries.jsonl", tmp_path / "anchor" / "anchor.json")
+    a, b = c.append("state", text="Same words."), c.append("state", text="Same words.")
+    assert a["salt"] and a["salt"] != b["salt"] and c.verify() == []
+    # Written before 0.10.0: no salt field, and its hash is what it always was.
+    old = {k: v for k, v in a.items() if k not in ("salt", "hash")}
+    old["hash"] = entry_hash(old)
+    assert old["hash"] != a["hash"] and entry_hash(old) == old["hash"]
+    lines = c.path.read_text(encoding="utf-8").splitlines()
+    lines[0] = json.dumps(old, sort_keys=True)
+    b2 = dict(json.loads(lines[1]), prev_hash=old["hash"])
+    b2["hash"] = entry_hash(b2)
+    lines[1] = json.dumps(b2, sort_keys=True)
+    c.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    c._write_anchor(b2["hash"], 2)
+    assert c.verify() == []

@@ -9,7 +9,7 @@ process, that a persona service is running, so that holonomic stops writing in h
 """
 from __future__ import annotations
 
-__version__ = "0.9.0"
+__version__ = "0.11.0"
 
 REQUEST_REFLECTION = {
     "name": "request_reflection",
@@ -63,7 +63,10 @@ def register(ctx) -> None:
     # slept=1: after a sleep that made a dream, tell her in slept/; her words on it come back in dream-thoughts/.
     # old_notes=1: offer her, once, the notes another model wrote in her voice, in old-notes.json.
     # compressed=1: before Hermes compresses a conversation, leave its messages in compressing/ for her.
-    os.environ[SERVICE_ENV] = f"thymos/{__version__} accounts=1 idle=1 slept=1 old_notes=1 compressed=1"
+    # fading=1: nothing fades unless she agrees (fading.json); memory-settings.json says what the settings are.
+    # dream_choice=1: with dream_reinforce chosen, show her what each dream reached; her choice comes back with her
+    # words on the dream.
+    os.environ[SERVICE_ENV] = f"thymos/{__version__} accounts=1 idle=1 slept=1 old_notes=1 compressed=1 fading=1 dream_choice=1"
 
     svc = Thymos(get_hermes_home, llm=ctx.llm, config=_config(ctx))
     ctx.register_tool(name="request_reflection", toolset="thymos", schema=REQUEST_REFLECTION,
@@ -79,6 +82,9 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", svc.pre_llm_call)
     ctx.register_hook("post_llm_call", svc.post_llm_call)
     ctx.register_hook("on_session_finalize", svc.on_session_finalize)
+    # A subagent she started, and when it comes back (Hermes' delegation hooks).
+    ctx.register_hook("subagent_start", svc.subagent_start)
+    ctx.register_hook("subagent_stop", svc.subagent_stop)
     # Her identity in force, where SOUL.md is in the system prompt, on every call (Hermes 0.19 and later).
     if hasattr(ctx, "register_middleware"):
         ctx.register_middleware("llm_request", svc.llm_request)
