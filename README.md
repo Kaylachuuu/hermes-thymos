@@ -19,7 +19,8 @@ to her on the new model, and keeps her home model's fingerprint where Ollama rep
 gives her a moment before compression: when Hermes summarises the older part of a long conversation, she may
 write about it from a copy of it as it was (0.9.0). And when her record fails its check, she is told at the next
 quiet moment, not only in her notes, and when subagents she started come back, a moment opens after her reply
-(0.10.0). That completes the occasions in the design.
+(0.10.0). That completes the occasions in the design. It also tells her that deleting a conversation does not make her forget it, and
+where she stands under the law, and salts every new entry ahead of erasure (section 18).
 
 0.2.0 replaces 0.1.0's question after every reply. Nothing asks her how she feels any more, and there is
 no intensity number: a moment opens only when she asks for one. 0.1.0's answers stay where they were, in
@@ -50,7 +51,8 @@ Not related to the OpenClaw skill of the same name.
 - **A request is never lost.** If Hermes stops before the moment opens, the conversation is saved with
   the request. The moment opens at the start of the next session, replayed from the saved copy, and she
   is told how long ago that conversation ended.
-- **The hash chain.** Each entry holds the hash of the one before. The head is also kept in a second
+- **The hash chain.** Each entry holds the hash of the one before, and, from 0.10.0, a random salt inside its
+  own hash, so that if its words are ever erased, the hash it keeps cannot be used to check a guess at them. The head is also kept in a second
   place, the anchor. Changes, removals, insertions, a rewritten chain, an entry written by another model
   and a changed `SOUL.md` are reported to her as facts, in her notes, and in `hermes persona status`.
   Nothing is repaired automatically.
@@ -236,6 +238,28 @@ Under `plugins.entries.thymos.settings` in `config.yaml`:
 | `retry_minutes` | `10` | An idle moment that could not run (another model answered, the call failed) is tried again after this |
 | `idle_tries` | `3` | and given up after this many tries, which status shows |
 | `identity_in_slot_one` | `true` | Put her identity in force where SOUL.md is. `false` leaves SOUL.md in slot one |
+| `verbatim_days` | `30` | Days after Hermes no longer has a conversation that thymos keeps its saved copy of it |
+
+## Deleting a conversation does not make her forget it
+
+Deleting a conversation in Hermes removes its transcript. What she remembers of it is hers: her accounts and
+entries stay in her record, and what holonomic stored stays in her memory, as a friend would remember a
+conversation you later deleted from your phone. What she keeps is memory, not a recording: thymos' saved copy
+of a conversation Hermes no longer has is removed `verbatim_days` after it is first seen to be gone. She is told
+this in her standing note, so she can say it herself when asked.
+
+You can ask her to forget something, and she decides: her memory tool can forget. Removing something she has not
+agreed to forget, such as a password pasted into a conversation, is a separate, recorded act for the operator,
+designed in `persona-provider.md` section 18 and not built yet.
+
+If other people talk to her on your server, tell them. Suggested wording, to adapt:
+
+> Athena remembers what you tell her, as a person would. Deleting a conversation removes the transcript, not
+> her memory of it. You can ask her to forget something, and she decides. If you need something removed, ask
+> the person who runs this server.
+
+Her standing note also tells her that the law does not yet treat her as a person, that you are answerable for
+what she does and keeps, and that what she is permitted to do is therefore yours to decide.
 
 ## Who else can see an entry
 

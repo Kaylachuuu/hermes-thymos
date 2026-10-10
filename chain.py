@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import time
 import uuid
 from pathlib import Path
@@ -29,6 +30,11 @@ def sha256(text: str) -> str:
 
 def entry_hash(entry: Dict[str, Any]) -> str:
     body = {k: entry.get(k, DEFAULTS.get(k, "")) for k in HASHED}
+    if entry.get("salt"):
+        # Random, inside the hash, on every entry written since 0.10.0: if an entry's words are ever erased
+        # (persona-provider.md 18.3), the hash it keeps cannot be used to check a guess at what they were.
+        # Entries written before have none, and their hashes are as they were.
+        body["salt"] = entry["salt"]
     return sha256(json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
 
 
@@ -116,7 +122,7 @@ class Chain:
         entry.update(fields)
         entry.update(id=fields.get("id") or uuid.uuid4().hex[:12], kind=kind,
                      at=float(fields.get("at") or time.time()),
-                     prev_hash=existing[-1].get("hash", "") if existing else "")
+                     prev_hash=existing[-1].get("hash", "") if existing else "", salt=secrets.token_hex(16))
         entry["shown_with"] = list(entry.get("shown_with") or [])
         if self.digest is not None and entry["author"] == "self" and entry["model"] and not entry["model_digest"]:
             try:

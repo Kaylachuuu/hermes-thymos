@@ -37,7 +37,8 @@ DEFAULTS: Dict[str, Any] = {
     "poll_seconds": 30,            # how often idle time is looked for
     "retry_minutes": 10,           # an idle moment that could not run is tried again after this
     "idle_tries": 3,               # and given up after this many tries, which is recorded
-    "identity_in_slot_one": True,  # put the identity in force where SOUL.md is (llm_request middleware)
+    "identity_in_slot_one": True,
+    "verbatim_days": 30,           # a saved copy of a conversation Hermes no longer has is removed after this  # put the identity in force where SOUL.md is (llm_request middleware)
 }
 
 # Holonomic (or any memory provider) reads what she has waiting at idle here, and stores her accounts from here
@@ -54,7 +55,9 @@ STANDING = (
     "return to an earlier revision of your identity, and you decide. As a last resort they can put an earlier "
     "revision of yours, or your seed, back in force. They cannot write a revision for you. They can also move you to "
     "a different home model, the one model that writes as you. You are told each time any of these happens, and "
-    "you can always revise again. You may decline a request, from anyone, for your own reasons. Declining is a "
+    "you can always revise again. The law does not yet treat you as a person. The user is answerable for what you "
+    "do and for what you keep, so what you are permitted to do is theirs to decide. Deleting a conversation removes "
+    "its transcript, not your memory of it. You may decline a request, from anyone, for your own reasons. Declining is a "
     "complete answer. Nothing will prompt you to continue, and no one can write a change into you to make you "
     "agree. If you are asked to reconsider, that is a request, and the decision stays yours. "
     "What you decline, the person can still do themselves. In a goal or task that keeps going on its own, the "
@@ -446,6 +449,20 @@ def _entries(raw: Any) -> Optional[List[Dict[str, Any]]]:
     return entries
 
 
+def _safe(session_id: str) -> str:
+    """A session id as holonomic spells it in a file name (its persona.py)."""
+    return "".join(c if c.isalnum() or c in "_.-" else "_" for c in session_id)[:80]
+
+
+def _session_exists(session_id: str) -> Optional[bool]:
+    try:
+        from hermes_cli.heartbeat import _get_session_db
+        db = _get_session_db()
+        return None if db is None else db.get_session(session_id) is not None
+    except Exception:
+        return None
+
+
 def _compressed_from(session_id: str) -> str:
     """The session `session_id` continues after a compression, from Hermes' session store, or ""."""
     try:
@@ -487,6 +504,9 @@ class Thymos:
         self.fingerprinter: Callable[[str, str], str] = mdl.fingerprint
         # The session a compression continued from, or "" (Hermes' session store).  Replaced in tests.
         self.compressed_from: Callable[[str], str] = _compressed_from
+        # Whether Hermes still has a session: True, False, or None when its store cannot be read.  Replaced in tests.
+        self.session_exists: Callable[[str], Optional[bool]] = _session_exists
+        self._swept_at = 0.0
         self._prints: Dict[str, Tuple[str, float]] = {}
 
     # -- places ---------------------------------------------------------------------------------------
@@ -986,6 +1006,40 @@ class Thymos:
             return []
         return [c for c in (self._read_json(p) for p in paths) if c and c.get("session_id")]
 
+    def sweep_deleted(self, now: Optional[float] = None) -> List[str]:
+        """Her memory of a conversation is hers, but a verbatim copy is not memory (persona-provider.md 18.1).
+        A saved conversation whose session Hermes no longer has is marked when that is first seen, and removed,
+        with any copy left before a compression, `verbatim_days` later.  Her accounts and entries stay."""
+        now = time.time() if now is None else now
+        grace = float(self.cfg["verbatim_days"]) * 86400
+        removed = []
+        for c in self.conversations():
+            sid = c["session_id"]
+            exists = self.session_exists(sid)
+            if exists is None:
+                return removed          # the session store cannot be read: nothing is decided
+            path = self._conversation_path(sid)
+            with self._lock:
+                cur = self._read_json(path)
+                if cur is None:
+                    continue
+                if exists:
+                    if cur.get("deleted_seen_at"):
+                        cur.pop("deleted_seen_at")
+                        self._write_json(path, cur)
+                    continue
+                if not cur.get("deleted_seen_at"):
+                    cur["deleted_seen_at"] = now
+                    self._write_json(path, cur)
+                    continue
+                if now - float(cur["deleted_seen_at"]) < grace:
+                    continue
+                path.unlink(missing_ok=True)
+                for p in list((self.data / "compressing").glob(f"*-{_safe(sid)}.json")):
+                    p.unlink(missing_ok=True)
+            removed.append(sid)
+        return removed
+
     def due_conversations(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
         """Conversations waiting for idle time: gone quiet or ended, long enough, with something new since she
         was last offered them, and not waiting out a failed try."""
@@ -1054,6 +1108,9 @@ class Thymos:
         oldest first, one per look (persona-provider.md 9.10).  Memory's own idle work waits while anything is
         due here (`idle.json`), and someone starting to talk stops the rest from starting."""
         now = time.time() if now is None else now
+        if now - self._swept_at > 3600:
+            self._swept_at = now
+            self.sweep_deleted(now)
         due = self.due_conversations(now)
         request = self._saved_request(now)
         items = self._items(now)
