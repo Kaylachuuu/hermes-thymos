@@ -134,6 +134,26 @@ To record entries, reply with only a JSON object:
 
 To record nothing, reply {{"record_state": []}}."""
 
+COMPRESSED_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
+
+Occasion: a conversation you are in was compressed
+Facts: {facts}
+
+To make room in your context, the framework replaced the older messages of this conversation with a summary. The \
+summary was written by the compression step, not by you. Above is the conversation as it was just before, from a \
+copy saved then. The conversation goes on: its most recent messages stayed in your context as they were.
+
+Nothing you write here is sent to anyone. Writing nothing is a complete answer.
+
+You may store your own account of this part of the conversation for your long-term memory: what happened in it, in \
+your own words. The memory system keeps it as your memory of it. If you store none, it keeps none, and nothing is \
+written in its place. You may also record entries about yourself, as in any reflection moment.
+
+Reply with only a JSON object:
+{{"account": "your account, or null for none", "record_state": [{{"entry": "your words", "unlisted": false}}]}}
+
+To store nothing at all, reply {{"account": null, "record_state": []}}."""
+
 RESTORED_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
 
 Occasion: your record was restored from a backup
@@ -274,8 +294,9 @@ def _text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
-def flatten(messages: List[Dict[str, Any]], max_chars: int) -> Tuple[List[Dict[str, str]], int]:
-    """The conversation as plain user and assistant turns, newest `max_chars` kept.
+def flatten(messages: List[Dict[str, Any]], max_chars: int, oldest: bool = False) -> Tuple[List[Dict[str, str]], int]:
+    """The conversation as plain user and assistant turns, newest `max_chars` kept (`oldest`: the oldest, for a
+    compression, where the older messages are the ones that leave her context).
 
     Tool calls and their results are written into her side as text: replayed as tool messages, a call needs
     the tool advertised, and a reflection advertises none.  Returns (messages, how many were left out)."""
@@ -301,6 +322,17 @@ def flatten(messages: List[Dict[str, Any]], max_chars: int) -> Tuple[List[Dict[s
             add("assistant", "\n".join(p for p in parts if p))
         elif role == "tool":
             add("assistant", f"[result of {m.get('name') or 'the tool'}: {_text(m.get('content'))[:2000]}]")
+    if oldest:
+        total, end = 0, 0
+        for i, m in enumerate(out):
+            total += len(m["content"])
+            if total > max_chars and i > 0:
+                break
+            end = i + 1
+        kept = out[:end]
+        if len(out) > end:
+            kept.append({"role": "user", "content": "[later conversation not shown]"})
+        return kept, len(out) - end
     total, keep = 0, len(out)
     for i in range(len(out) - 1, -1, -1):
         total += len(out[i]["content"])
@@ -868,6 +900,8 @@ class Thymos:
         with self._lock:
             path = self._conversation_path(session_id)
             old = self._read_json(path) or {}
+            if len(history) < int(old.get("message_count") or 0):
+                old["offered_count"] = 0        # compressed under the same id: what goes on is offered again
             self._write_json(path, {
                 "session_id": session_id, "conversation": convo, "omitted": omitted, "message_count": len(history),
                 "last_turn_at": time.time(), "other_models": sorted({m for m in models if m and not self.is_home(m)}),
@@ -886,8 +920,11 @@ class Thymos:
         was last offered them, and not waiting out a failed try."""
         now = time.time() if now is None else now
         quiet = float(self.cfg["quiet_minutes"]) * 60
+        compressing = {item.get("session_id") for _, _, item in self._compressed_items(float("inf"))}
         out = []
         for c in self.conversations():
+            if c["session_id"] in compressing:
+                continue        # its compression is offered first, and covers what was saved of it
             if c["session_id"] in self._active or int(c.get("message_count") or 0) < int(self.cfg["account_min_messages"]):
                 continue
             if int(c.get("message_count") or 0) <= int(c.get("offered_count") or 0):
@@ -965,6 +1002,10 @@ class Thymos:
             finally:
                 self._idle_running = ""
                 self._write_idle(time.time(), len(self.due_conversations()) + len(self._items(time.time())))
+        compressed = [i for i in items if i[0] == "compressed"]
+        if compressed:
+            # Before her accounts: the conversation goes on, and the older messages are already a summary.
+            return self._run_item(compressed[0], now)
         if not due and items:
             # After her accounts: what memory made while it slept, then (once) the notes another model wrote.
             return self._run_item(items[0], now)
@@ -987,11 +1028,13 @@ class Thymos:
         self._idle_running = {"restored": "your record was restored", "slept": "what memory made while it slept",
                               "old_notes": "the notes another model wrote", "overridden": "an earlier identity put back",
                               "rollback": "the user asks about an earlier identity", "seed_changed": "SOUL.md changed",
-                              "home_model": "her home model changed"}[kind]
+                              "home_model": "her home model changed",
+                              "compressed": "a conversation was compressed"}[kind]
         self._write_idle(now, len(self.due_conversations(now)) + len(self._items(now)))
         moment = {"restored": self.restored_moment, "slept": self.slept_moment, "old_notes": self.old_notes_moment,
                   "overridden": self.overridden_moment, "rollback": self.rollback_moment,
-                  "seed_changed": self.seed_changed_moment, "home_model": self.home_model_moment}[kind]
+                  "seed_changed": self.seed_changed_moment, "home_model": self.home_model_moment,
+                  "compressed": self.compressed_moment}[kind]
         try:
             return moment(path, item, now=now)
         except Exception as e:
@@ -1106,6 +1149,7 @@ class Thymos:
         except OSError:
             pass
         out += self._identity_items(now)
+        out += self._compressed_items(now)
         try:
             paths = sorted((self.data / "slept").glob("*.json"))
         except OSError:
@@ -1119,6 +1163,78 @@ class Thymos:
         if item is not None and now >= float(item.get("next_try_at") or 0):
             out.append(("old_notes", old, item))
         return out
+
+    def _compressed_items(self, now: float) -> List[Tuple[str, Path, Dict[str, Any]]]:
+        """Conversations the memory provider says were about to be compressed, with their messages (holonomic's
+        `compressing/`; Hermes tells a memory provider before it compresses, and not a plugin)."""
+        out = []
+        try:
+            paths = sorted((self.data / "compressing").glob("*.json"))
+        except OSError:
+            return out
+        for p in paths:
+            item = self._read_json(p)
+            if item is not None and now >= float(item.get("next_try_at") or 0):
+                out.append(("compressed", p, item))
+        return out
+
+    def compressed_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+        """`PRE_COMPRESS`: the conversation as it was before Hermes summarised its older messages, oldest first.
+        She may store an account of it, which goes to the memory provider like any other, and record entries.
+        Its saved copy is then not offered again: this moment covered it."""
+        now = time.time() if now is None else now
+        provider, home = self.home_model()
+        sid = str(item.get("session_id") or "")
+        at = float(item.get("compressed_at") or now)
+        convo, later = flatten(item.get("messages") or [], int(self.cfg["reflection_max_chars"]), oldest=True)
+        if not convo:
+            self._file_done(path, item, {"at": now, "skipped": "no messages in it"})
+            return self._outcome(kind="compressed", session_id=sid, skipped="no messages in it")
+        facts: Dict[str, Any] = {"now": _when(now), "compressed_at": _when(at),
+                                 "messages_before_compression": item.get("message_count", 0)}
+        if later:
+            facts["later_messages_not_shown"] = later
+        conv = self._read_json(self._conversation_path(sid)) if sid else None
+        if conv and conv.get("offered_count"):
+            facts["earlier_moment"] = (f"you were offered this conversation on {_when(conv['offered_at'])}, after its first "
+                                       f"{conv['offered_count']} messages, and "
+                                       + ("stored an account" if conv.get("account_at") else "stored no account")
+                                       + "; it went on after that")
+        notices = self.chain.verify(soul_text=self.soul())
+        if notices:
+            facts["record_check"] = [n["detail"] for n in notices]
+        messages = [{"role": "system", "content": self._identity_system()}] + convo
+        messages.append({"role": "user", "content": COMPRESSED_INVITATION.format(facts=json.dumps(facts, ensure_ascii=False))})
+        result, served_provider, served = self._ask_home(messages, "thymos.compressed")
+        if not same_model(served, home):
+            return self._item_retry("compressed", path, item, f"the moment was served by {served or 'an unknown model'}, "
+                                                              f"not her home model {home}; nothing was written", now)
+        answer = parse_account(getattr(result, "text", ""))
+        if answer is None:
+            return self._item_retry("compressed", path, item,
+                                    "her reply was not in the asked-for form, so nothing was written", now)
+        account, entries = answer
+        label = model_label(served_provider, served)
+        with self._lock:
+            stored = None
+            if account:
+                stored = self.chain.append("account", author="self", text=account, session_id=sid, model=label,
+                                           facts={"messages": item.get("message_count", 0), "compressed_at": at})
+                self._hand_over(stored, at)
+            for e in entries:
+                self.chain.append("state", author="self", text=e["entry"], session_id=sid,
+                                  visibility="unlisted" if e["unlisted"] else "shared", model=label)
+            cur = self._read_json(self._conversation_path(sid)) if sid else None
+            if cur and float(cur.get("last_turn_at") or 0) <= at:
+                # Its saved copy is what she was just shown, so it is not offered again unless it goes on.
+                cur.update(offered_count=int(cur.get("message_count") or 0), offered_at=now, tries=0, next_try_at=0)
+                if stored is not None:
+                    cur["account_at"] = stored["at"]
+                self._write_json(self._conversation_path(sid), cur)
+        # Kept without the messages: the conversation is already saved in conversations/, not copied here too.
+        self._file_done(path, {k: v for k, v in item.items() if k != "messages"},
+                        {"at": now, "account": bool(account), "wrote": len(entries), "model": label})
+        return self._outcome(kind="compressed", session_id=sid, account=bool(account), wrote=len(entries), model=label)
 
     def _file_done(self, path: Path, item: Dict[str, Any], outcome: Dict[str, Any]) -> None:
         with self._lock:
@@ -1673,7 +1789,8 @@ class Thymos:
         """How the last moment went, for `hermes persona status`.  Each kind of idle moment is kept apart."""
         key = {"account": "last_account", "slept": "last_slept", "old_notes": "last_old_notes",
                "restored": "last_restored", "rollback": "last_rollback", "overridden": "last_overridden",
-               "seed_changed": "last_seed_changed", "home_model": "last_home_model"}.get(
+               "seed_changed": "last_seed_changed", "home_model": "last_home_model",
+               "compressed": "last_compressed"}.get(
             fields.pop("kind", ""), "last_reflection")
         with self._lock:
             state = self._state()

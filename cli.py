@@ -292,6 +292,22 @@ def _idle_lines(svc: Thymos, state: dict) -> list:
             if lm.get("problem"):
                 line += f"; {lm['problem']}"
             out.append(line)
+    compressing = len(svc._compressed_items(float("inf")))
+    lc = state.get("last_compressed")
+    if compressing or lc:
+        line = f"before compression: {compressing} waiting to be offered to her"
+        if lc:
+            line += f"; last moment {_when(lc['at'])}"
+            if lc.get("skipped"):
+                line += f", skipped: {lc['skipped']}"
+            elif "account" in lc:
+                line += (", she stored an account" if lc["account"] else ", she stored no account")
+                if lc.get("wrote"):
+                    line += f" and {_n(lc['wrote'], 'entry', 'entries')}"
+                line += f" on {lc.get('model')}"
+            if lc.get("problem"):
+                line += f"; {lc['problem']}"
+        out.append(line)
     old = svc.data / "old-notes.json"
     lo = state.get("last_old_notes")
     if old.exists() or lo:

@@ -9,7 +9,7 @@ process, that a persona service is running, so that holonomic stops writing in h
 """
 from __future__ import annotations
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 REQUEST_REFLECTION = {
     "name": "request_reflection",
@@ -62,7 +62,8 @@ def register(ctx) -> None:
     # conversations, left in plugin-data/thymos/accounts/.  idle=1: what she has waiting is in idle.json.
     # slept=1: after a sleep that made a dream, tell her in slept/; her words on it come back in dream-thoughts/.
     # old_notes=1: offer her, once, the notes another model wrote in her voice, in old-notes.json.
-    os.environ[SERVICE_ENV] = f"thymos/{__version__} accounts=1 idle=1 slept=1 old_notes=1"
+    # compressed=1: before Hermes compresses a conversation, leave its messages in compressing/ for her.
+    os.environ[SERVICE_ENV] = f"thymos/{__version__} accounts=1 idle=1 slept=1 old_notes=1 compressed=1"
 
     svc = Thymos(get_hermes_home, llm=ctx.llm, config=_config(ctx))
     ctx.register_tool(name="request_reflection", toolset="thymos", schema=REQUEST_REFLECTION,
