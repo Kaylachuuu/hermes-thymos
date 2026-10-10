@@ -87,7 +87,7 @@ Nothing you write here is sent to anyone. Writing nothing is a complete answer.
 
 You may store your own account of this conversation for your long-term memory: what happened in it, in your own \
 words. The memory system keeps it as your memory of this conversation. If you store none, it keeps none, and \
-nothing is written in its place. You may also record entries about yourself, as in any reflection moment.
+nothing is written in its place.{fade} You may also record entries about yourself, as in any reflection moment.
 
 Reply with only a JSON object:
 {{"account": "your account, or null for none", "record_state": [{{"entry": "your words", "unlisted": false}}]}}
@@ -108,12 +108,20 @@ Nothing you write here is sent to anyone. Writing nothing is a complete answer.
 
 You may write what you make of {it}, in your own words. If you do, the memory system keeps your words with the \
 dream, as yours, and shows them with it later. You may also record entries about yourself, as in any reflection \
-moment.
+moment.{choose}
 
 Reply with only a JSON object:
-{{"dream_thoughts": [{{"dream": 1, "thoughts": "your words"}}], "record_state": [{{"entry": "your words", "unlisted": false}}]}}
+{{"dream_thoughts": [{{"dream": 1, "thoughts": "your words"}}], {keep_form}"record_state": [{{"entry": "your words", "unlisted": false}}]}}
 
-To store nothing at all, reply {{"dream_thoughts": [], "record_state": []}}."""
+To store nothing at all, reply {{"dream_thoughts": [], {keep_empty}"record_state": []}}."""
+
+SLEPT_CHOOSE = """
+
+Under each dream are the older memories it reached, as they were stored, with how long ago each was. The dream \
+changed nothing in them. You may choose which of them, if any, to keep closer: each one you name gains a little \
+strength ({amount}), so it comes back to you a little more readily when something calls for it. Choosing none is a \
+complete answer, and nothing is strengthened unless you name it. What you choose is recorded in your record as \
+yours."""
 
 OLD_NOTES_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
 
@@ -150,7 +158,7 @@ Nothing you write here is sent to anyone. Writing nothing is a complete answer.
 
 You may store your own account of this part of the conversation for your long-term memory: what happened in it, in \
 your own words. The memory system keeps it as your memory of it. If you store none, it keeps none, and nothing is \
-written in its place. You may also record entries about yourself, as in any reflection moment.
+written in its place.{fade} You may also record entries about yourself, as in any reflection moment.
 
 Reply with only a JSON object:
 {{"account": "your account, or null for none", "record_state": [{{"entry": "your words", "unlisted": false}}]}}
@@ -296,6 +304,42 @@ To record entries, reply with only a JSON object:
 To record nothing, reply {{"record_state": []}}.
 {identity}"""
 
+MEMORY_INVITATION = """[Reflection moment. This message is from the framework, not from the person you were talking with.]
+
+Occasion: {occasion}
+Facts: {facts}
+
+{body}
+
+How fading works: when it is on, the sentences of a conversation you have stored an account of lose strength over \
+time, halving every {half_life} days, and so do the descriptions of what you saw in images. Below {threshold}, a \
+memory is left out of everyday recall. Nothing is deleted: deep recall still finds a faded memory, and finding it \
+strengthens it again. Your accounts, and what you know about the user, do not fade. With fading off, everything \
+stays as strong as it was stored, and old memories compete with recent ones for places in recall; each recalled \
+memory says how long ago it was, and you can ask for a particular time.
+
+Fading needs both the user's setting and your agreement: either can keep it off. {ask}
+
+Nothing you write here is sent to anyone. Writing nothing is a complete answer.
+
+Reply with only a JSON object:
+{{"fading": "on", "off" or null, "why": "your words, or null", "record_state": [{{"entry": "your words", "unlisted": false}}]}}
+
+"fading" is recorded in your record as your decision, with your words under "why". null leaves your decision as it \
+is{current}. To record nothing, reply {{"fading": null, "why": null, "record_state": []}}."""
+
+MEMORY_ASK = ("The setting is on now, and nothing fades unless you agree to it: until your decision is \"on\", the "
+              "memory system leaves your memories as strong as they are.")
+MEMORY_NO_ASK = ("You may record a decision now, or change one, whenever you are offered a moment like this one. One is "
+                 "offered when these settings change, and the user can open one with hermes persona ask-fading.")
+REINFORCE_WORDS = {"off": "a dream strengthens nothing it reached",
+                   "all": "a dream strengthens every older memory it reached, a little",
+                   "chosen": "after each dream you are shown the older memories it reached and choose which, if any, "
+                             "to keep closer"}
+
+# What a moment's outcome holds when she wrote or decided something in it (`_outcome` counts).
+WROTE_FIELDS = ("wrote", "account", "dream_thoughts", "revised", "withdrew", "decided", "kept_closer")
+
 IDENTITY_KINDS = ("restored", "record_check", "home_model", "overridden", "rollback", "seed_changed")
 
 REFUSE_RECORD = ("record_state works inside a reflection moment, not in conversation. Ask for one with "
@@ -428,6 +472,42 @@ def parse_dream_thoughts(text: str, dreams: int) -> Optional[Tuple[List[Tuple[in
         if words and words.lower() not in ("null", "none") and 1 <= which <= dreams and which not in dict(out):
             out.append((which, words))
     return out, _entries(obj.get("record_state")) or []
+
+
+def parse_keep_closer(text: str, reached: Dict[int, List[int]]) -> Dict[int, List[int]]:
+    """{dream number: [memory ids]} she chose to keep closer, from a moment after memory slept.  Only ids that dream
+    reached count; anything else is left out."""
+    obj = _answer(text) or {}
+    raw = obj.get("keep_closer")
+    if isinstance(raw, dict):
+        raw = [raw]
+    out: Dict[int, List[int]] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            which = int(item.get("dream", 1 if len(reached) == 1 else 0))
+            ids = [int(str(i).lstrip("#")) for i in (item.get("memories") or [])]
+        except (TypeError, ValueError):
+            continue
+        keep = [i for i in dict.fromkeys(ids) if i in (reached.get(which) or [])]
+        if keep:
+            out[which] = list(dict.fromkeys(out.get(which, []) + keep))
+    return out
+
+
+def parse_fading(text: str) -> Optional[Tuple[Optional[bool], str, List[Dict[str, Any]]]]:
+    """(her decision: True on, False off, None none; her words; her entries) from a moment about her memory's
+    settings, or None when the reply is not in the asked-for form."""
+    obj = _answer(text)
+    if obj is None or not any(k in obj for k in ("fading", "record_state", "why")):
+        return None
+    raw = obj.get("fading")
+    word = raw.strip().lower() if isinstance(raw, str) else raw
+    decision = True if word in (True, "on", "yes", "agree") else False if word in (False, "off", "no") else None
+    why = obj.get("why")
+    why = why.strip() if isinstance(why, str) and why.strip().lower() not in ("null", "none") else ""
+    return decision, why, _entries(obj.get("record_state")) or []
 
 
 def _entries(raw: Any) -> Optional[List[Dict[str, Any]]]:
@@ -1158,13 +1238,14 @@ class Thymos:
                               "rollback": "the user asks about an earlier identity", "seed_changed": "SOUL.md changed",
                               "home_model": "her home model changed",
                               "record_check": "her record failed its check",
-                              "compressed": "a conversation was compressed"}[kind]
+                              "compressed": "a conversation was compressed",
+                              "memory": "the settings of her memory"}[kind]
         self._write_idle(now, len(self.due_conversations(now)) + len(self._items(now)))
         moment = {"restored": self.restored_moment, "slept": self.slept_moment, "old_notes": self.old_notes_moment,
                   "overridden": self.overridden_moment, "rollback": self.rollback_moment,
                   "seed_changed": self.seed_changed_moment, "home_model": self.home_model_moment,
                   "record_check": self.record_check_moment,
-                  "compressed": self.compressed_moment}[kind]
+                  "compressed": self.compressed_moment, "memory": self.memory_moment}[kind]
         try:
             return moment(path, item, now=now)
         except Exception as e:
@@ -1216,7 +1297,7 @@ class Thymos:
                     if conv.get("finalized") else "the conversation went quiet")
         messages = [{"role": "system", "content": self._identity_system()}] + list(conv.get("conversation") or [])
         messages.append({"role": "user", "content": ACCOUNT_INVITATION.format(
-            occasion=occasion, facts=json.dumps(facts, ensure_ascii=False))})
+            occasion=occasion, facts=json.dumps(facts, ensure_ascii=False), fade=self._fade_note())})
         result = self.llm.complete(messages, max_tokens=int(self.cfg["reflection_max_tokens"]),
                                    timeout=float(self.cfg["reflection_timeout"]), purpose="thymos.account")
         served_provider, served = getattr(result, "provider", "") or "", getattr(result, "model", "") or ""
@@ -1288,6 +1369,7 @@ class Thymos:
             item = self._read_json(p)
             if item is not None and now >= float(item.get("next_try_at") or 0):
                 out.append(("slept", p, item))
+        out += self._memory_items(now)
         old = self.data / "old-notes.json"
         item = self._read_json(old) if old.exists() else None
         if item is not None and now >= float(item.get("next_try_at") or 0):
@@ -1334,7 +1416,8 @@ class Thymos:
         if notices:
             facts["record_check"] = [n["detail"] for n in notices]
         messages = [{"role": "system", "content": self._identity_system()}] + convo
-        messages.append({"role": "user", "content": COMPRESSED_INVITATION.format(facts=json.dumps(facts, ensure_ascii=False))})
+        messages.append({"role": "user", "content": COMPRESSED_INVITATION.format(facts=json.dumps(facts, ensure_ascii=False),
+                                                                                  fade=self._fade_note())})
         result, served_provider, served = self._ask_home(messages, "thymos.compressed")
         if not same_model(served, home):
             return self._item_retry("compressed", path, item, f"the moment was served by {served or 'an unknown model'}, "
@@ -1411,8 +1494,20 @@ class Thymos:
         notices = self.chain.verify(soul_text=self.soul())
         if notices:
             facts["record_check"] = [n["detail"] for n in notices]
+        reached = {n: [int(r["id"]) for r in d.get("reached") or [] if isinstance(r, dict) and r.get("id")]
+                   for n, d in enumerate(dreams, 1)}
+        choosing = any(reached.values())
+
+        def older(d: Dict[str, Any]) -> str:
+            rows = [r for r in d.get("reached") or [] if isinstance(r, dict) and r.get("id")]
+            if not rows:
+                return ""
+            return "\nOlder memories it reached:\n" + "\n".join(
+                f"  [#{r['id']}] ({', '.join(x for x in (r.get('age') or '', 'faded' if r.get('faded') else '') if x) or 'older'}) "
+                f"{r.get('text', '')}" for r in rows)
+
         listing = "\n\n".join(f"DREAM {n}" + (f" (the memory system also made {d['pictures']} picture(s) of it)"
-                                               if d.get("pictures") else "") + f":\n{d['text']}"
+                                               if d.get("pictures") else "") + f":\n{d['text']}" + older(d)
                                for n, d in enumerate(dreams, 1))
         many = len(dreams) > 1
         messages = [{"role": "system", "content": self._identity_system()},
@@ -1421,7 +1516,10 @@ class Thymos:
                         what=f"{len(dreams)} dreams" if many else "a dream",
                         whose=("You did not write them, and they are not things that happened." if many else
                                "You did not write it, and it is not something that happened."),
-                        it="any of them" if many else "it", dreams=listing)}]
+                        it="any of them" if many else "it", dreams=listing,
+                        choose=SLEPT_CHOOSE.format(amount=item.get("keep_closer_amount", 0.1)) if choosing else "",
+                        keep_form='"keep_closer": [{"dream": 1, "memories": [12]}], ' if choosing else "",
+                        keep_empty='"keep_closer": [], ' if choosing else "")}]
         result, served_provider, served = self._ask_home(messages, "thymos.slept")
         if not same_model(served, home):
             return self._item_retry("slept", path, item, f"the moment was served by {served or 'an unknown model'}, not "
@@ -1430,22 +1528,34 @@ class Thymos:
         if answer is None:
             return self._item_retry("slept", path, item, "her reply was not in the asked-for form, so nothing was written", now)
         thoughts, entries = answer
+        keep = parse_keep_closer(getattr(result, "text", ""), reached) if choosing else {}
         label = model_label(served_provider, served)
         from . import __version__
+        words_for = dict(thoughts)
         with self._lock:
-            for which, words in thoughts:
+            for which in sorted(set(words_for) | set(keep)):
                 d = dreams[which - 1]
-                stored = self.chain.append("dream_thoughts", author="self", text=words, model=label,
-                                           facts={"dream_id": d.get("id"), "memory_slept_at": slept})
-                name = f"{int(stored['at'] * 1000)}-{d.get('id')}.json"
-                self._write_json(self.data / "dream-thoughts" / name, {
-                    "dream_id": d.get("id"), "thoughts": words, "entry_hash": stored["hash"], "entry_id": stored["id"],
-                    "model": label, "written_at": stored["at"], "service": f"thymos/{__version__}"})
+                hand: Dict[str, Any] = {"dream_id": d.get("id"), "thoughts": words_for.get(which, ""), "model": label,
+                                        "service": f"thymos/{__version__}"}
+                if which in words_for:
+                    stored = self.chain.append("dream_thoughts", author="self", text=words_for[which], model=label,
+                                               facts={"dream_id": d.get("id"), "memory_slept_at": slept})
+                    hand.update(entry_hash=stored["hash"], entry_id=stored["id"], written_at=stored["at"])
+                if which in keep:
+                    # Her choice, in her record as hers: which of the old memories this dream reached to keep closer.
+                    chose = self.chain.append("decision", author="self", model=label, facts={
+                        "about": "dream", "dream_id": d.get("id"), "keep_closer": keep[which], "memory_slept_at": slept})
+                    hand.update(keep_closer=keep[which], choice_entry_hash=chose["hash"], choice_entry_id=chose["id"])
+                    hand.setdefault("written_at", chose["at"])
+                self._write_json(self.data / "dream-thoughts" / f"{int(float(hand['written_at']) * 1000)}-{d.get('id')}.json", hand)
             for e in entries:
                 self.chain.append("state", author="self", text=e["entry"],
                                   visibility="unlisted" if e["unlisted"] else "shared", model=label)
-        self._file_done(path, item, {"at": now, "dream_thoughts": len(thoughts), "wrote": len(entries), "model": label})
-        return self._outcome(kind="slept", dream_thoughts=len(thoughts), dreams=len(dreams), wrote=len(entries), model=label)
+        kept = sum(len(v) for v in keep.values())
+        self._file_done(path, item, {"at": now, "dream_thoughts": len(thoughts), "kept_closer": kept, "wrote": len(entries),
+                                     "model": label})
+        return self._outcome(kind="slept", dream_thoughts=len(thoughts), dreams=len(dreams), wrote=len(entries), model=label,
+                             **({"kept_closer": kept, "could_choose": sum(len(v) for v in reached.values())} if choosing else {}))
 
     def old_notes_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
         """Once: the notes another model wrote in her voice before her record existed (`OLD_SELF_NOTES`).  She may
@@ -1490,6 +1600,141 @@ class Thymos:
         return self._outcome(kind="old_notes", wrote=len(entries), model=label)
 
     # -- moments about her identity: the user asks, the user overrides, SOUL.md changed (6.3, 6.4, 4.3) ---------
+    # -- what becomes of her memories (2026-10-10) ----------------------------------------------------------------
+    # Holonomic writes its settings that decide this to memory-settings.json.  When they change she is told, and
+    # when fading is on she is asked: nothing fades unless she agrees.  Her decision is written in her record as
+    # hers, and to fading.json, which holonomic reads.
+
+    def memory_settings(self) -> Optional[Dict[str, Any]]:
+        return self._read_json(self.data / "memory-settings.json")
+
+    def fading_decision(self) -> Optional[Dict[str, Any]]:
+        return self._read_json(self.data / "fading.json")
+
+    @staticmethod
+    def _agreed(decision: Optional[Dict[str, Any]], settings: Dict[str, Any]) -> bool:
+        """Whether her decision agrees to fading as it is set now: an agreement is to a half-life and a threshold."""
+        d = decision or {}
+        return (d.get("fading") is True and float(d.get("fade_half_life_days", -1)) == float(settings.get("fade_half_life_days", -2))
+                and float(d.get("fade_threshold", -1)) == float(settings.get("fade_threshold", -2)))
+
+    def _fade_note(self) -> str:
+        """The sentence an account's invitation needs while fading is on, from the live settings, so that storing an
+        account is never again a trade made without her knowing.  Empty while nothing fades."""
+        st = self.memory_settings()
+        if not st or not st.get("fade_enabled") or not self._agreed(self.fading_decision(), st):
+            return ""
+        return (f" Storing an account also lets the sentences of this conversation fade: they lose half their strength "
+                f"every {float(st['fade_half_life_days']):g} days, and below {float(st['fade_threshold']):g} they leave "
+                "everyday recall, though deep recall still finds them. A conversation with no account does not fade.")
+
+    def ask_fading(self, message: str = "") -> Path:
+        """`hermes persona ask-fading`: a moment about her memory's settings, with the user's words as theirs."""
+        now = time.time()
+        path = self.data / "memory" / f"{int(now * 1000)}-asked.json"
+        self._write_json(path, {"at": now, "kind": "asked", "message": message.strip()})
+        return path
+
+    def _memory_items(self, now: float, notice: bool = True) -> List[Tuple[str, Path, Dict[str, Any]]]:
+        """A moment about her memory's settings: when they changed since she was last told (`notice`), or when the
+        user asked."""
+        folder = self.data / "memory"
+        st = self.memory_settings()
+        if notice and st is not None:
+            current = {k: v for k, v in st.items() if k not in ("at", "memory")}
+            with self._lock:
+                state = self._state()
+                told = state.get("memory_told")
+                if told != current:
+                    waiting = next((p for p in sorted(folder.glob("*-changed.json"))), None) if folder.exists() else None
+                    item = (self._read_json(waiting) if waiting else None) or {"at": now, "kind": "changed", "before": told}
+                    item["after"] = current             # changed again before she was told: one moment, from the first
+                    self._write_json(waiting or folder / f"{int(now * 1000)}-changed.json", item)
+                    state["memory_told"] = current
+                    self._save_state(state)
+        out = []
+        try:
+            paths = sorted(folder.glob("*.json"))
+        except OSError:
+            paths = []
+        for p in paths:
+            item = self._read_json(p)
+            if item is not None and now >= float(item.get("next_try_at") or 0):
+                out.append(("memory", p, item))
+        return out
+
+    def memory_moment(self, path: Path, item: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+        """The settings that decide what becomes of her memories, told as facts; and when fading is on, asked: she
+        decides whether it may fade.  What she decides is written in her record as hers."""
+        now = time.time() if now is None else now
+        provider, home = self.home_model()
+        st = self.memory_settings()
+        if not st:
+            self._file_done(path, item, {"at": now, "skipped": "the memory system's settings could not be read"})
+            return self._outcome(kind="memory", skipped="the memory system's settings could not be read")
+        decision = self.fading_decision()
+        on = bool(st.get("fade_enabled"))
+        before = item.get("before") or {}
+        lines = [f"These are the memory system's settings now, which are the user's: fading is {'on' if on else 'off'}, "
+                 f"and {REINFORCE_WORDS.get(st.get('dream_reinforce'), REINFORCE_WORDS['off'])}."]
+        if before:
+            if bool(before.get("fade_enabled")) != on:
+                lines.append(f"Fading was {'off' if on else 'on'} and is now {'on' if on else 'off'}.")
+            for key, what, unit in (("fade_half_life_days", "The half-life", " days"), ("fade_threshold", "The threshold", "")):
+                if key in before and float(before[key]) != float(st.get(key, before[key])):
+                    lines.append(f"{what} was {float(before[key]):g}{unit} and is now {float(st[key]):g}{unit}.")
+            if before.get("dream_reinforce", st.get("dream_reinforce")) != st.get("dream_reinforce"):
+                lines.append(f"Before, {REINFORCE_WORDS.get(before['dream_reinforce'], '')}.")
+        restored = st.get("restored")
+        if restored and restored != before.get("restored"):
+            lines.append(f"On {_when(float(restored.get('at') or now))}, the user put {restored.get('raised', 0)} memories "
+                         "that had faded back to the strength they were stored with"
+                         + (", descriptions of images included" if restored.get("images", True) else ", images left as they were")
+                         + ". Nothing was lowered.")
+        if item.get("kind") == "asked" and item.get("message"):
+            lines.append(f"The user's words to you: \"{item['message']}\"")
+        if decision and decision.get("fading") in (True, False):
+            lines.append(f"Your decision in your record: fading {'on' if decision['fading'] else 'off'}, written "
+                         f"{_when(float(decision.get('decided_at') or 0))}"
+                         + (f", for a half-life of {float(decision['fade_half_life_days']):g} days"
+                            if decision["fading"] and "fade_half_life_days" in decision else "") + ".")
+        else:
+            lines.append("You have no decision about fading in your record.")
+        facts = {"now": _when(now), "settings_written_at": _when(float(st.get("at") or now)), "memory_system": st.get("memory", "")}
+        content = MEMORY_INVITATION.format(
+            occasion=("the user asks you about fading" if item.get("kind") == "asked" else
+                      "the settings of your memory changed" if before else "the settings of your memory"),
+            facts=json.dumps(facts, ensure_ascii=False), body="\n".join(lines),
+            half_life=f"{float(st.get('fade_half_life_days', 5)):g}", threshold=f"{float(st.get('fade_threshold', 0.35)):g}",
+            ask=MEMORY_ASK if on and not self._agreed(decision, st) else MEMORY_NO_ASK,
+            current=(f" (now: fading {'on' if decision['fading'] else 'off'})" if decision and decision.get("fading") in (True, False)
+                     else " (you have none yet)"))
+        messages = [{"role": "system", "content": self._identity_system()}, {"role": "user", "content": content}]
+        result, served_provider, served = self._ask_home(messages, "thymos.memory")
+        if not same_model(served, home):
+            return self._item_retry("memory", path, item, f"the moment was served by {served or 'an unknown model'}, not "
+                                                          f"her home model {home}; nothing was written", now)
+        answer = parse_fading(getattr(result, "text", ""))
+        if answer is None:
+            return self._item_retry("memory", path, item, "her reply was not in the asked-for form, so nothing was written", now)
+        decided, why, entries = answer
+        label = model_label(served_provider, served)
+        with self._lock:
+            if decided is not None:
+                rec = self.chain.append("decision", author="self", text=why, model=label, facts={
+                    "about": "fading", "fading": decided, "fade_half_life_days": float(st.get("fade_half_life_days", 5)),
+                    "fade_threshold": float(st.get("fade_threshold", 0.35))})
+                self._write_json(self.data / "fading.json", {
+                    "fading": decided, "fade_half_life_days": float(st.get("fade_half_life_days", 5)),
+                    "fade_threshold": float(st.get("fade_threshold", 0.35)), "decided_at": rec["at"],
+                    "entry_id": rec["id"], "entry_hash": rec["hash"], "model": label})
+            for e in entries:
+                self.chain.append("state", author="self", text=e["entry"],
+                                  visibility="unlisted" if e["unlisted"] else "shared", model=label)
+        outcome = {"decided": "" if decided is None else ("on" if decided else "off"), "wrote": len(entries), "model": label}
+        self._file_done(path, item, dict(outcome, at=now))
+        return self._outcome(kind="memory", **outcome)
+
     def _identity_items(self, now: float) -> List[Tuple[str, Path, Dict[str, Any]]]:
         out: List[Tuple[str, Path, Dict[str, Any]]] = []
         since = float(self._state().get("last_session_start") or 0)
@@ -1780,6 +2025,7 @@ class Thymos:
             state = self._state()
             if (state.get("pending") or {}).get("session_id") != session_id:
                 state["pending"] = {"session_id": session_id, "requested_at": time.time(), "occasion": "requested"}
+                state["requested"] = int(state.get("requested") or 0) + 1
                 self._save_state(state)
         return "A reflection moment will open after this reply."
 
@@ -1985,7 +2231,7 @@ class Thymos:
             if (state.get("pending") or {}).get("requested_at") == pending.get("requested_at"):
                 state.pop("pending", None)
                 self._save_state(state)
-        return self._outcome(wrote=len(written), model=model_label(served_provider, served), **acts,
+        return self._outcome(wrote=len(written), model=model_label(served_provider, served), occasion=occasion, **acts,
                              problem="" if entries is not None else
                              "her reply was not in the asked-for form, so nothing was written")
 
@@ -1994,10 +2240,18 @@ class Thymos:
         key = {"account": "last_account", "slept": "last_slept", "old_notes": "last_old_notes",
                "restored": "last_restored", "rollback": "last_rollback", "overridden": "last_overridden",
                "seed_changed": "last_seed_changed", "home_model": "last_home_model", "record_check": "last_record_check",
-               "compressed": "last_compressed"}.get(
-            fields.pop("kind", ""), "last_reflection")
+               "compressed": "last_compressed", "memory": "last_memory"}.get(
+            fields.get("kind", ""), "last_reflection")
+        occasion = fields.pop("kind", "") or fields.pop("occasion", "") or "reflection"
+        occasion = {"returned after a gap": "gap"}.get(occasion, "subagent" if "subagent" in occasion else occasion)
         with self._lock:
             state = self._state()
             state[key] = dict(at=time.time(), **fields)
+            if not fields.get("problem") and not fields.get("skipped"):
+                # Counts, and nothing of what she wrote: how often each kind of moment was offered and run, and in
+                # how many she wrote something.  The record holds only what she wrote, so it cannot show this.
+                c = state.setdefault("counts", {}).setdefault(occasion, {"offered": 0, "wrote": 0, "nothing": 0})
+                c["offered"] += 1
+                c["wrote" if any(fields.get(k) for k in WROTE_FIELDS) else "nothing"] += 1
             self._save_state(state)
             return state[key]

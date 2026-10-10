@@ -155,6 +155,13 @@ def do_override(svc: Thymos, ref: str = "", reason: str = "", withdraw: bool = F
     return f"override {rec['id']} written; it takes effect at the next session start"
 
 
+def do_ask_fading(svc: Thymos, message: str = "") -> str:
+    svc.ask_fading(message)
+    return ("asked: she will be shown her memory's settings and asked whether it may fade, at the next quiet moment "
+            "while Hermes is running" + (", with your message" if message.strip() else "") + ". She decides, and her "
+            "decision is written in her record as hers.")
+
+
 def do_ask_rollback(svc: Thymos, ref: str, message: str = "") -> str:
     target = svc.find_identity(ref)
     if target is None:
@@ -312,6 +319,40 @@ def _idle_lines(svc: Thymos, state: dict) -> list:
             if lc.get("problem"):
                 line += f"; {lc['problem']}"
         out.append(line)
+    st = svc.memory_settings()
+    decided = svc.fading_decision()
+    waiting = len(svc._memory_items(float("inf"), notice=False))
+    lm = state.get("last_memory")
+    if st or decided or waiting or lm:
+        line = "her memory's settings: " + (f"fading {'on' if st.get('fade_enabled') else 'off'} in the settings" if st
+                                             else "not known (holonomic 0.29 or later writes them)")
+        line += "; her decision: " + ({True: "on", False: "off"}.get((decided or {}).get("fading"), "none"))
+        if decided and decided.get("decided_at"):
+            line += f" ({_when(decided['decided_at'])})"
+        if st and st.get("fade_enabled") and not svc._agreed(decided, st):
+            line += "; nothing fades until she agrees"
+        if waiting:
+            line += f"; {waiting} moment(s) waiting to be offered to her"
+        if lm:
+            line += f"; last moment {_when(lm['at'])}"
+            if lm.get("skipped"):
+                line += f", skipped: {lm['skipped']}"
+            elif "decided" in lm:
+                line += (f", she decided {lm['decided']}" if lm["decided"] else ", she recorded no decision") + f" on {lm.get('model')}"
+            if lm.get("problem"):
+                line += f"; {lm['problem']}"
+        out.append(line)
+    counts = state.get("counts") or {}
+    if counts:
+        # Counts only, and nothing of what she wrote: whether she writes in every moment, or writes nothing or
+        # declines in some, is a fact the record alone cannot show.
+        names = {"account": "account", "compressed": "before compression", "slept": "after memory slept",
+                 "old_notes": "old notes", "memory": "memory settings", "requested": "asked for by her",
+                 "session_end": "session end", "gap": "return after a gap", "subagent": "subagents finished"}
+        out.append("moments offered: " + "; ".join(
+            f"{names.get(k, k.replace('_', ' '))} {c['offered']} (wrote in {c['wrote']}, nothing in {c['nothing']})"
+            for k, c in sorted(counts.items())))
+    out.append(f"asked for a reflection herself: {int(state.get('requested') or 0)}; declined: {int(state.get('declines') or 0)}")
     old = svc.data / "old-notes.json"
     lo = state.get("last_old_notes")
     if old.exists() or lo:
@@ -396,6 +437,8 @@ def register_cli(parser: Any, svc_factory) -> None:
     a = sub.add_parser("ask-rollback", help="Ask her to return to an earlier revision of her identity; she decides")
     a.add_argument("ref", help="A revision id (or its start), or 'seed'")
     a.add_argument("--message", default="", help="Your words to her, shown to her as yours")
+    f = sub.add_parser("ask-fading", help="Ask her whether her memories may fade; she decides")
+    f.add_argument("--message", default="", help="Your words to her, shown to her as yours")
     o = sub.add_parser("override", help="Last resort: put an earlier revision of hers, or her seed, back in force")
     o.add_argument("ref", nargs="?", default="", help="A revision id (or its start), or 'seed'")
     o.add_argument("--reason", default="", help="Why, in your words; she is shown it")
@@ -416,6 +459,8 @@ def register_cli(parser: Any, svc_factory) -> None:
             print(identity_text(svc_factory(), args.ref))
         elif command == "ask-rollback":
             print(do_ask_rollback(svc_factory(), args.ref, args.message))
+        elif command == "ask-fading":
+            print(do_ask_fading(svc_factory(), args.message))
         elif command == "override":
             print(do_override(svc_factory(), args.ref, args.reason, args.withdraw, args.yes))
         elif command == "home-model":

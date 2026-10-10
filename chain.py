@@ -18,7 +18,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 # empty for now; they are here so the record format does not change when those features arrive.
 HASHED = ("id", "kind", "author", "text", "facts", "reason", "at", "session_id", "visibility", "scope",
           "shown_with", "person_id", "audience_id", "about", "model", "model_digest", "prev_hash")
-KINDS = ("state", "revision", "withdrawal", "seed", "restore", "override", "home_model", "account", "dream_thoughts")
+KINDS = ("state", "revision", "withdrawal", "seed", "restore", "override", "home_model", "account", "dream_thoughts",
+         "decision")
 DEFAULTS: Dict[str, Any] = {"author": "self", "text": "", "facts": {}, "reason": "", "session_id": "",
                             "visibility": "shared", "scope": "everywhere", "shown_with": [], "person_id": "",
                             "audience_id": "", "about": "", "model": "", "model_digest": ""}
